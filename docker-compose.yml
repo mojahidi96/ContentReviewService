@@ -1,0 +1,66 @@
+# Local development stack: MongoDB + the API (with the in-process worker).
+# The Python LLM service lives in a separate repository. By default the API uses the built-in
+# mock client; to use the real service set PYTHON_LLM_MODE=http and PYTHON_LLM_SERVICE_URL
+# (e.g. http://host.docker.internal:8000) in your shell or an .env file next to this file.
+name: content-review
+
+services:
+  mongo:
+    image: mongo:8.0
+    restart: unless-stopped
+    ports:
+      - '127.0.0.1:27017:27017'
+    volumes:
+      - mongo-data:/data/db
+    healthcheck:
+      test: ['CMD', 'mongosh', '--quiet', '--eval', 'db.adminCommand("ping").ok']
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  api:
+    build: .
+    depends_on:
+      mongo:
+        condition: service_healthy
+    ports:
+      - '127.0.0.1:3000:3000'
+    environment:
+      # Development-only values. Production must use a secret manager (see README).
+      NODE_ENV: development
+      PORT: 3000
+      LOG_LEVEL: info
+      MONGODB_URI: mongodb://mongo:27017/content_review
+      FRONTEND_ORIGIN: ${FRONTEND_ORIGIN:-http://localhost:4200}
+      AUTH_JWT_SECRET: ${AUTH_JWT_SECRET:-dev-only-jwt-secret-change-me-0123456789abcdef}
+      CSRF_SECRET: ${CSRF_SECRET:-dev-only-csrf-secret-change-me-0123456789abcdef}
+      AUTH_COOKIE_SECURE: 'false'
+      PYTHON_LLM_MODE: ${PYTHON_LLM_MODE:-mock}
+      PYTHON_LLM_SERVICE_URL: ${PYTHON_LLM_SERVICE_URL:-http://host.docker.internal:8000}
+      PYTHON_LLM_SERVICE_TOKEN: ${PYTHON_LLM_SERVICE_TOKEN:-}
+    extra_hosts:
+      - 'host.docker.internal:host-gateway'
+
+  # Optional dedicated worker: `docker compose --profile worker up`.
+  # When used, set WORKER_ENABLED=false on `api` to separate HTTP and processing.
+  worker:
+    profiles: ['worker']
+    build: .
+    command: ['node', 'dist/worker.js']
+    depends_on:
+      mongo:
+        condition: service_healthy
+    environment:
+      NODE_ENV: development
+      MONGODB_URI: mongodb://mongo:27017/content_review
+      FRONTEND_ORIGIN: ${FRONTEND_ORIGIN:-http://localhost:4200}
+      AUTH_JWT_SECRET: ${AUTH_JWT_SECRET:-dev-only-jwt-secret-change-me-0123456789abcdef}
+      CSRF_SECRET: ${CSRF_SECRET:-dev-only-csrf-secret-change-me-0123456789abcdef}
+      PYTHON_LLM_MODE: ${PYTHON_LLM_MODE:-mock}
+      PYTHON_LLM_SERVICE_URL: ${PYTHON_LLM_SERVICE_URL:-http://host.docker.internal:8000}
+      PYTHON_LLM_SERVICE_TOKEN: ${PYTHON_LLM_SERVICE_TOKEN:-}
+    extra_hosts:
+      - 'host.docker.internal:host-gateway'
+
+volumes:
+  mongo-data:
