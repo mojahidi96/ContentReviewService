@@ -2,6 +2,7 @@ import type { NextFunction, Request, Response } from 'express';
 import type { Env } from '../config/env.js';
 import type { AuthService } from '../modules/auth/auth.service.js';
 import { clearSessionCookieOptions } from '../modules/auth/cookies.js';
+import { setContextValue } from '../infrastructure/observability/context.js';
 import { Errors } from '../shared/errors/app-error.js';
 
 /**
@@ -16,8 +17,10 @@ export function createSessionLoader(authService: AuthService, env: Env) {
       return;
     }
     const auth = await authService.resolveSession(token);
-    if (auth) req.auth = auth;
-    else res.clearCookie(env.AUTH_COOKIE_NAME, clearSessionCookieOptions(env));
+    if (auth) {
+      req.auth = auth;
+      setContextValue('userId', auth.userId);
+    } else res.clearCookie(env.AUTH_COOKIE_NAME, clearSessionCookieOptions(env));
     next();
   };
 }

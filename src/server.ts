@@ -4,6 +4,7 @@ import { connectDatabase, disconnectDatabase, ensureIndexes } from './config/dat
 import { EnvValidationError, loadEnv, type Env } from './config/env.js';
 import { createLogger, type Logger } from './config/logger.js';
 import { createContainer, type Container } from './container.js';
+import { startMetricsServer } from './infrastructure/metrics/metrics-server.js';
 
 /** Registers SIGTERM/SIGINT handlers that drain work in a safe order, then exit. */
 export function registerShutdown(
@@ -61,6 +62,13 @@ export async function bootstrap(): Promise<{ container: Container; server: Serve
   server.headersTimeout = 66_000;
 
   if (env.WORKER_ENABLED) container.worker.start();
+  const metricsServer = container.metricsRegistry
+    ? startMetricsServer(container.metricsRegistry, {
+        host: env.METRICS_HOST,
+        port: env.METRICS_PORT,
+        logger,
+      })
+    : null;
 
   registerShutdown(
     logger,
@@ -82,6 +90,14 @@ export async function bootstrap(): Promise<{ container: Container; server: Serve
       },
       { name: 'worker', run: () => container.worker.stop(env.SHUTDOWN_GRACE_MS) },
       { name: 'llm-client', run: () => container.llmClient.close() },
+      {
+        name: 'metrics',
+        run: () =>
+          new Promise<void>((resolve) => {
+            if (!metricsServer) resolve();
+            else metricsServer.close(() => resolve());
+          }),
+      },
       { name: 'database', run: () => disconnectDatabase() },
     ],
     () => {

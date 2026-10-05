@@ -167,13 +167,41 @@ Findings are embedded: they are always read and written with their review, are b
 
 ## Observability
 
-- Structured JSON logs (Pino) with `req.id` = `X-Request-Id`; job logs carry `reviewId`,
-  `jobId`, `attempt`. The review id is forwarded to Python as `X-Request-Id`.
-- `/health/live` (process) and `/health/ready` (MongoDB ping; Python health reported but not
-  gating; `503` while shutting down).
-- `MetricsRecorder` hooks: HTTP latency by route, job outcomes and durations, LLM call
-  outcomes/latency, active SSE connections. The default implementation logs; plug in
-  Prometheus/OpenTelemetry by implementing the interface in `src/infrastructure/metrics/`.
+Three signals, each with its own job:
+
+| Signal  | Question it answers   | Implementation                                   | Local backend          |
+| ------- | --------------------- | ------------------------------------------------ | ---------------------- |
+| Logs    | What happened?        | Pino JSON to stdout                              | Alloy → Loki → Grafana |
+| Metrics | How much, how fast?   | `prom-client` on an internal `/metrics` listener | Prometheus → Grafana   |
+| Health  | Can it serve traffic? | `/health/live`, `/health/ready`                  | orchestrator probes    |
+
+**Logs.** One JSON line per HTTP request (pino-http; `/health` excluded) plus application
+events. An `AsyncLocalStorage` context (`src/infrastructure/observability/context.ts`) is
+opened per request (`requestId`, then `userId` once the session resolves) and per job attempt
+(`reviewId`, `jobId`, `attempt`); a Pino `mixin` copies it onto **every** line, so logs from
+services and the processor are correlated without passing loggers around. The review id is
+forwarded to Python as `X-Request-Id`. Redaction plus minimal serializers keep secrets and
+content out. Logs always go to stdout; shipping is the platform's job (Alloy, Fluent Bit,
+CloudWatch agent…). `LOG_FORMAT=pretty` is for local development only.
+
+**Metrics.** `PrometheusMetrics` implements the `MetricsRecorder` hooks with a per-process
+registry: `http_requests_total` / `http_request_duration_seconds` (method, **route template**,
+status), `review_jobs_total` / `review_job_duration_seconds`, `llm_calls_total` /
+`llm_call_duration_seconds` (outcome, error code), `sse_active_connections`, `review_jobs_queue`
+(read from MongoDB at scrape time) and default Node.js process metrics. Route labels are captured
+when the router matches, so raw ids never become label values. `/metrics` is served on
+`METRICS_PORT` (default 9464), a separate listener that is not routed through the public API.
+Note: for the SSE route, request "duration" is the stream lifetime; dashboards exclude it from
+latency percentiles.
+
+**Dashboard.** `observability/` holds a provisioned Grafana dashboard (traffic, errors,
+latency, job outcomes/duration, queue depth, LLM calls/latency, SSE streams, CPU/memory/
+event-loop lag, and a Loki log panel searchable by `requestId`/`reviewId`/`userId`), run via
+`docker compose --profile observability up`.
+
+**Next step if needed: tracing.** OpenTelemetry (`@opentelemetry/sdk-node` with HTTP, Express,
+MongoDB and undici instrumentation) would add distributed traces across Node → Python, and its
+Pino instrumentation injects `trace_id` into these same log lines.
 
 ## Scaling notes
 

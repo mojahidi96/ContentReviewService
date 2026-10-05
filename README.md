@@ -180,6 +180,43 @@ The image is multi-stage, runs as the non-root `node` user, contains only produc
 dependencies, and has a liveness `HEALTHCHECK`. Compose binds ports to `127.0.0.1` and uses
 development-only secrets; never use them in production.
 
+## Observability
+
+**Logging** uses [Pino](https://getpino.io): structured JSON on stdout, one line per HTTP request
+(method, route path, status, latency; `/health` excluded) plus application events. Every line
+written during a request or job automatically carries its correlation ids (`requestId`,
+`userId`, `reviewId`, `jobId`, `attempt`) via `AsyncLocalStorage`. Responses return
+`X-Request-Id`, and error bodies include `error.requestId`, so a user-reported error can be
+traced to its log lines. Passwords, cookies, tokens, CSRF tokens and document content are never
+logged. Use `LOG_FORMAT=pretty` locally for readable, colorized output (JSON is enforced in
+production).
+
+**Metrics** are exposed in Prometheus format on a separate internal port
+(`http://<host>:9464/metrics`, configurable via `METRICS_PORT`; never on the public API port):
+request rate/latency/errors by route template, review job outcomes and durations, queue depth,
+Python LLM call outcomes and latency, open SSE streams, and Node.js process metrics (CPU, memory,
+GC, event-loop lag).
+
+**Dashboard** (local): Grafana + Prometheus + Loki + Grafana Alloy run as a compose profile.
+
+```bash
+docker compose --profile observability up --build
+# add --profile worker to also run (and scrape) the dedicated worker
+```
+
+| URL                           | What                                                                                              |
+| ----------------------------- | ------------------------------------------------------------------------------------------------- |
+| http://localhost:3001         | Grafana (admin / `$GRAFANA_ADMIN_PASSWORD`, default `admin`) → "Content Review Service" dashboard |
+| http://localhost:9090/targets | Prometheus scrape targets                                                                         |
+
+To find everything about one request, paste its `X-Request-Id` (or a `reviewId`) into the
+dashboard's **Search logs** box, or use Explore → Loki:
+`{service="content-review-service"} | json | requestId="<id>"`.
+
+In production, point your platform's log agent at container stdout and have Prometheus (or a
+compatible agent such as Grafana Alloy / Datadog / CloudWatch) scrape port 9464; the dashboard
+JSON in `observability/grafana/dashboards/` can be imported into any Grafana.
+
 ## Deployment and security checklist
 
 - `NODE_ENV=production` enforces: `AUTH_COOKIE_SECURE=true`, https-only `FRONTEND_ORIGIN`,
@@ -199,3 +236,5 @@ development-only secrets; never use them in production.
 - Point orchestrator probes at `/health/live` and `/health/ready`; `SIGTERM` drains HTTP, SSE
   and in-flight jobs within `SHUTDOWN_GRACE_MS`.
 - Logs exclude passwords, cookies, tokens, CSRF tokens, document content and finding text.
+- Keep the metrics port (`METRICS_PORT`) private to your monitoring network; do not route it
+  through the public load balancer. Change the Grafana admin password for any shared setup.

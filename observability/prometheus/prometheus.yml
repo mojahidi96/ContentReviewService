@@ -1,0 +1,17 @@
+# Local development scrape config. /metrics is served on each process's internal METRICS_PORT.
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: content-review-api
+    static_configs:
+      - targets: ['api:9464']
+        labels:
+          process: api
+  # Only present with `--profile worker`; shows as down otherwise.
+  - job_name: content-review-worker
+    static_configs:
+      - targets: ['worker:9464']
+        labels:
+          process: worker

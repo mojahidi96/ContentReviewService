@@ -7,6 +7,7 @@ import { connectDatabase, disconnectDatabase, ensureIndexes } from './config/dat
 import { EnvValidationError, loadEnv, type Env } from './config/env.js';
 import { createLogger } from './config/logger.js';
 import { createContainer } from './container.js';
+import { startMetricsServer } from './infrastructure/metrics/metrics-server.js';
 
 let env: Env;
 try {
@@ -20,6 +21,13 @@ await connectDatabase(env.MONGODB_URI, logger);
 const container = createContainer(env, logger);
 await ensureIndexes();
 container.worker.start();
+const metricsServer = container.metricsRegistry
+  ? startMetricsServer(container.metricsRegistry, {
+      host: env.METRICS_HOST,
+      port: env.METRICS_PORT,
+      logger,
+    })
+  : null;
 
 let stopping = false;
 async function stop(signal: string) {
@@ -28,6 +36,7 @@ async function stop(signal: string) {
   logger.info({ signal }, 'Worker shutting down');
   await container.worker.stop(env.SHUTDOWN_GRACE_MS);
   await container.llmClient.close();
+  metricsServer?.close();
   await disconnectDatabase();
   logger.flush();
   process.exit(0);

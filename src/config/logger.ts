@@ -1,4 +1,5 @@
-import { pino, type Logger } from 'pino';
+import { pino, type DestinationStream, type Logger, type LoggerOptions } from 'pino';
+import { getContext } from '../infrastructure/observability/context.js';
 import type { Env } from './env.js';
 
 /**
@@ -28,14 +29,38 @@ export const REDACT_PATHS = [
   '*.suggestedText',
 ];
 
-export function createLogger(env: Pick<Env, 'LOG_LEVEL' | 'NODE_ENV'>): Logger {
-  return pino({
+/**
+ * JSON to stdout in every environment that ships logs (collectors parse it); `LOG_FORMAT=pretty`
+ * is a local-development convenience. `destination` lets tests capture output.
+ */
+export function createLogger(
+  env: Pick<Env, 'LOG_LEVEL' | 'NODE_ENV' | 'LOG_FORMAT'>,
+  destination?: DestinationStream,
+): Logger {
+  const options: LoggerOptions = {
     level: env.LOG_LEVEL,
     base: { service: 'content-review-service' },
     redact: { paths: REDACT_PATHS, censor: '[REDACTED]' },
     timestamp: pino.stdTimeFunctions.isoTime,
     formatters: { level: (label) => ({ level: label }) },
-  });
+    // Every line written inside a request or job carries its correlation ids.
+    mixin: () => ({ ...getContext() }),
+  };
+  if (destination) return pino(options, destination);
+  if (env.LOG_FORMAT === 'pretty') {
+    return pino({
+      ...options,
+      transport: {
+        target: 'pino-pretty',
+        options: {
+          colorize: true,
+          translateTime: 'SYS:HH:MM:ss.l',
+          ignore: 'pid,hostname,service',
+        },
+      },
+    });
+  }
+  return pino(options);
 }
 
 export type { Logger };

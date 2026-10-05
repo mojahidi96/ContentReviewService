@@ -10,7 +10,7 @@ import { createErrorHandler } from './middleware/error-handler.js';
 import { notFound } from './middleware/not-found.js';
 import { createOriginCheck } from './middleware/origin-check.js';
 import { createRateLimiter } from './middleware/rate-limit.js';
-import { requestId } from './middleware/request-id.js';
+import { requestId, restoreRequestContext } from './middleware/request-id.js';
 import { createApiRouter, createRootHealthRouter } from './routes/index.js';
 import './shared/types/express.js';
 
@@ -42,12 +42,11 @@ export function createApp(c: Container): Express {
   );
   app.use((req, res, next) => {
     const started = performance.now();
+    const route = captureRouteTemplate(req);
     res.on('finish', () => {
       c.metrics.observeHttpRequest({
         method: req.method,
-        route:
-          `${req.baseUrl}${(req.route as { path?: string } | undefined)?.path ?? ''}` ||
-          'unmatched',
+        route: route.template ?? 'unmatched',
         statusCode: res.statusCode,
         durationMs: performance.now() - started,
       });
@@ -86,6 +85,7 @@ export function createApp(c: Container): Express {
     createRateLimiter({ windowMs: env.RATE_LIMIT_WINDOW_MS, limit: env.RATE_LIMIT_MAX }),
   );
   app.use('/api', express.json({ limit: env.BODY_LIMIT, strict: true, type: 'application/json' }));
+  app.use('/api', restoreRequestContext);
   app.use('/api', cookieParser());
   app.use('/api', createSessionLoader(c.authService, env));
 
@@ -95,4 +95,27 @@ export function createApp(c: Container): Express {
   app.use(notFound);
   app.use(createErrorHandler());
   return app;
+}
+
+/**
+ * Records the matched route template (e.g. "/api/v1/reviews/:reviewId") at the moment the
+ * router assigns `req.route`, while `req.baseUrl` is still the router's mount path. Reading it at
+ * response time is unreliable because Express restores `baseUrl` when an error leaves a router.
+ * Templates (never raw URLs) keep metric label cardinality bounded.
+ */
+function captureRouteTemplate(req: express.Request): { template?: string } {
+  const captured: { template?: string } = {};
+  let current: unknown;
+  Object.defineProperty(req, 'route', {
+    configurable: true,
+    enumerable: true,
+    get: () => current,
+    set: (value: { path?: unknown } | undefined) => {
+      current = value;
+      if (value && typeof value.path === 'string') {
+        captured.template = `${req.baseUrl}${value.path}`.replace(/(.)\/$/, '$1');
+      }
+    },
+  });
+  return captured;
 }

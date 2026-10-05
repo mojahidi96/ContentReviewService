@@ -5,7 +5,10 @@ import { SseRegistry } from './infrastructure/events/sse.js';
 import { JobQueue } from './infrastructure/jobs/job-queue.js';
 import { JobWorker } from './infrastructure/jobs/job-worker.js';
 import { ReviewRecovery } from './infrastructure/jobs/review-recovery.js';
+import type { Registry } from 'prom-client';
+import { ReviewJobModel } from './infrastructure/jobs/job.model.js';
 import { LoggingMetrics, type MetricsRecorder } from './infrastructure/metrics/metrics.js';
+import { PrometheusMetrics } from './infrastructure/metrics/prometheus-metrics.js';
 import { HttpPythonLlmClient } from './integrations/python-llm/http-llm-client.js';
 import type { PythonLlmClient } from './integrations/python-llm/llm-client.js';
 import { MockPythonLlmClient } from './integrations/python-llm/mock-llm-client.js';
@@ -19,6 +22,8 @@ export interface Container {
   env: Env;
   logger: Logger;
   metrics: MetricsRecorder;
+  /** Present when Prometheus metrics are enabled; served by the internal metrics server. */
+  metricsRegistry: Registry | null;
   bus: EventBus;
   sseRegistry: SseRegistry;
   llmClient: PythonLlmClient;
@@ -43,12 +48,26 @@ export function createLlmClient(env: Env, logger: Logger): PythonLlmClient {
   });
 }
 
+export function createMetrics(env: Env, logger: Logger): MetricsRecorder {
+  if (!env.METRICS_ENABLED) return new LoggingMetrics(logger.child({ component: 'metrics' }));
+  return new PrometheusMetrics({ queueDepth: countJobsByStatus });
+}
+
+async function countJobsByStatus(): Promise<Record<string, number>> {
+  const rows = await ReviewJobModel.aggregate<{ _id: string; count: number }>([
+    { $group: { _id: '$status', count: { $sum: 1 } } },
+  ]);
+  const counts: Record<string, number> = { queued: 0, running: 0, succeeded: 0, failed: 0 };
+  for (const row of rows) counts[row._id] = row.count;
+  return counts;
+}
+
 export function createContainer(
   env: Env,
   logger: Logger,
   overrides: Partial<Pick<Container, 'llmClient' | 'metrics'>> = {},
 ): Container {
-  const metrics = overrides.metrics ?? new LoggingMetrics(logger.child({ component: 'metrics' }));
+  const metrics = overrides.metrics ?? createMetrics(env, logger);
   const bus = new EventBus();
   const llmClient = overrides.llmClient ?? createLlmClient(env, logger);
   const events = new ReviewEventStore(bus);
@@ -89,6 +108,7 @@ export function createContainer(
     env,
     logger,
     metrics,
+    metricsRegistry: metrics instanceof PrometheusMetrics ? metrics.registry : null,
     bus,
     sseRegistry: new SseRegistry(),
     llmClient,

@@ -61,6 +61,11 @@ const envSchema = z
     LOG_LEVEL: z
       .enum(['fatal', 'error', 'warn', 'info', 'debug', 'trace', 'silent'])
       .default('info'),
+    LOG_FORMAT: z.enum(['json', 'pretty']).default('json'),
+
+    METRICS_ENABLED: bool.default(true),
+    METRICS_HOST: z.string().default('0.0.0.0'),
+    METRICS_PORT: int(1, 65535).default(9464),
 
     MONGODB_URI: z.url({ protocol: /^mongodb(\+srv)?$/ }),
 
@@ -131,6 +136,13 @@ const envSchema = z
           'PYTHON_LLM_SERVICE_TOKEN must be at least 16 characters when PYTHON_LLM_MODE=http',
       });
     }
+    if (env.METRICS_ENABLED && env.METRICS_PORT === env.PORT) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['METRICS_PORT'],
+        message: 'METRICS_PORT must differ from PORT so /metrics stays off the public listener',
+      });
+    }
     if (env.JOB_BACKOFF_MAX_MS < env.JOB_BACKOFF_BASE_MS) {
       ctx.addIssue({
         code: 'custom',
@@ -163,6 +175,13 @@ const envSchema = z
         code: 'custom',
         path: ['AUTH_COOKIE_SECURE'],
         message: 'AUTH_COOKIE_SECURE must be true in production',
+      });
+    }
+    if (env.LOG_FORMAT !== 'json') {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['LOG_FORMAT'],
+        message: 'LOG_FORMAT must be json in production (pino-pretty is a dev dependency)',
       });
     }
     if (env.PYTHON_LLM_MODE !== 'http') {

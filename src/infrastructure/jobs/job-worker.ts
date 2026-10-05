@@ -5,6 +5,7 @@ import type { ReviewProcessor } from '../../modules/reviews/review.processor.js'
 import { sleep } from '../../shared/utils/backoff.js';
 import type { EventBus } from '../events/event-bus.js';
 import type { MetricsRecorder } from '../metrics/metrics.js';
+import { runWithContext } from '../observability/context.js';
 import type { JobQueue } from './job-queue.js';
 import type { ReviewJobRecord } from './job.model.js';
 import type { ReviewRecovery } from './review-recovery.js';
@@ -145,7 +146,10 @@ export class JobWorker {
     );
 
     try {
-      const outcome = await this.deps.processor.process(job, this.workerId, controller.signal);
+      const outcome = await runWithContext(
+        { reviewId: job.reviewId.toString(), jobId: job._id.toString(), attempt: job.attempts },
+        () => this.deps.processor.process(job, this.workerId, controller.signal),
+      );
       if (outcome !== 'skipped') {
         this.deps.metrics.observeJob({
           outcome,

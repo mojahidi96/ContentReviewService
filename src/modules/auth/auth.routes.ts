@@ -1,5 +1,6 @@
 import { Router, type Request, type Response } from 'express';
 import type { Env } from '../../config/env.js';
+import { setContextValue } from '../../infrastructure/observability/context.js';
 import { getAuth, requireAuth } from '../../middleware/authenticate.js';
 import type { CsrfProtection } from '../../middleware/csrf.js';
 import { validateRequest } from '../../middleware/validate-request.js';
@@ -27,6 +28,7 @@ export function createAuthRouter(deps: {
     const { maxAge: _maxAge, ...anonClear } = anonCookieOptions(env);
     res.clearCookie(anonCookieName(env), anonClear);
     req.auth = { userId: session.user.id, sessionId: session.sessionId };
+    setContextValue('userId', session.user.id);
     return csrf.issueToken(req, res, { rotate: true });
   }
 

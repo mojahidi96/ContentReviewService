@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import mongoose from 'mongoose';
+import type { DestinationStream } from 'pino';
 import type { Response as AgentResponse } from 'superagent';
 import supertest from 'supertest';
 import { inject } from 'vitest';
@@ -8,7 +9,7 @@ import { ensureIndexes } from '../../src/config/database.js';
 import { loadEnv, type Env } from '../../src/config/env.js';
 import { createLogger } from '../../src/config/logger.js';
 import { createContainer, type Container } from '../../src/container.js';
-import { NoopMetrics } from '../../src/infrastructure/metrics/metrics.js';
+import { NoopMetrics, type MetricsRecorder } from '../../src/infrastructure/metrics/metrics.js';
 import { MockPythonLlmClient } from '../../src/integrations/python-llm/mock-llm-client.js';
 import type { PythonLlmClient } from '../../src/integrations/python-llm/llm-client.js';
 import { ReviewModel, type ReviewRecord } from '../../src/modules/reviews/review.model.js';
@@ -64,13 +65,18 @@ export interface TestApp {
 }
 
 export function createTestApp(
-  options: { env?: Record<string, string>; llmClient?: PythonLlmClient } = {},
+  options: {
+    env?: Record<string, string>;
+    llmClient?: PythonLlmClient;
+    metrics?: MetricsRecorder;
+    logDestination?: DestinationStream;
+  } = {},
 ): TestApp {
   const env = testEnv(options.env);
   const llm = new MockPythonLlmClient();
-  const container = createContainer(env, createLogger(env), {
+  const container = createContainer(env, createLogger(env, options.logDestination), {
     llmClient: options.llmClient ?? llm,
-    metrics: new NoopMetrics(),
+    metrics: options.metrics ?? new NoopMetrics(),
   });
   return { app: createApp(container), container, llm };
 }

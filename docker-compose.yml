@@ -25,11 +25,16 @@ services:
         condition: service_healthy
     ports:
       - '127.0.0.1:3000:3000'
+    # Prometheus metrics: reachable on the compose network only, never published to the host.
+    expose:
+      - '9464'
     environment:
       # Development-only values. Production must use a secret manager (see README).
       NODE_ENV: development
       PORT: 3000
       LOG_LEVEL: info
+      LOG_FORMAT: json
+      METRICS_PORT: 9464
       MONGODB_URI: mongodb://mongo:27017/content_review
       FRONTEND_ORIGIN: ${FRONTEND_ORIGIN:-http://localhost:4200}
       AUTH_JWT_SECRET: ${AUTH_JWT_SECRET:-dev-only-jwt-secret-change-me-0123456789abcdef}
@@ -47,11 +52,15 @@ services:
     profiles: ['worker']
     build: .
     command: ['node', 'dist/worker.js']
+    expose:
+      - '9464'
     depends_on:
       mongo:
         condition: service_healthy
     environment:
       NODE_ENV: development
+      LOG_FORMAT: json
+      METRICS_PORT: 9464
       MONGODB_URI: mongodb://mongo:27017/content_review
       FRONTEND_ORIGIN: ${FRONTEND_ORIGIN:-http://localhost:4200}
       AUTH_JWT_SECRET: ${AUTH_JWT_SECRET:-dev-only-jwt-secret-change-me-0123456789abcdef}
@@ -62,5 +71,59 @@ services:
     extra_hosts:
       - 'host.docker.internal:host-gateway'
 
+  # --- Observability (local only): `docker compose --profile observability up` ---------------
+  # Grafana http://localhost:3001 · Prometheus http://localhost:9090
+  prometheus:
+    profiles: ['observability']
+    image: prom/prometheus:v3.15.0
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.retention.time=7d
+    volumes:
+      - ./observability/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    ports:
+      - '127.0.0.1:9090:9090'
+
+  loki:
+    profiles: ['observability']
+    image: grafana/loki:3.7.8
+    command: ['-config.file=/etc/loki/loki-config.yml']
+    volumes:
+      - ./observability/loki/loki-config.yml:/etc/loki/loki-config.yml:ro
+      - loki-data:/loki
+
+  alloy:
+    profiles: ['observability']
+    image: grafana/alloy:v1.20.1
+    command: ['run', '--storage.path=/var/lib/alloy/data', '/etc/alloy/config.alloy']
+    volumes:
+      - ./observability/alloy/config.alloy:/etc/alloy/config.alloy:ro
+      # Development only: lets Alloy read container logs.
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    depends_on:
+      - loki
+
+  grafana:
+    profiles: ['observability']
+    image: grafana/grafana:13.2.3
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
+      GF_USERS_ALLOW_SIGN_UP: 'false'
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /etc/grafana/dashboards/content-review-service.json
+    volumes:
+      - ./observability/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./observability/grafana/dashboards:/etc/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+    ports:
+      - '127.0.0.1:3001:3000'
+    depends_on:
+      - prometheus
+      - loki
+
 volumes:
   mongo-data:
+  prometheus-data:
+  loki-data:
+  grafana-data:
