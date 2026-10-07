@@ -107,6 +107,7 @@ const envSchema = z
     JOB_ORPHAN_AGE_MS: int(1_000, 86_400_000).default(60_000),
 
     REVIEW_MAX_CONTENT_CHARS: int(1, 1_000_000).default(50_000),
+    DOCUMENT_MAX_CONTENT_CHARS: int(1, 1_000_000).default(50_000),
     REVIEW_RETENTION_DAYS: int(0, 3650).default(90),
     BODY_LIMIT: z.string().default('512kb'),
 

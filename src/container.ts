@@ -13,6 +13,7 @@ import { HttpPythonLlmClient } from './integrations/python-llm/http-llm-client.j
 import type { PythonLlmClient } from './integrations/python-llm/llm-client.js';
 import { MockPythonLlmClient } from './integrations/python-llm/mock-llm-client.js';
 import { AuthService } from './modules/auth/auth.service.js';
+import { DocumentService } from './modules/documents/document.service.js';
 import { ReviewEventStore } from './modules/reviews/review-event-store.js';
 import { ReviewProcessor } from './modules/reviews/review.processor.js';
 import { ReviewService } from './modules/reviews/review.service.js';
@@ -33,6 +34,7 @@ export interface Container {
   processor: ReviewProcessor;
   recovery: ReviewRecovery;
   reviewService: ReviewService;
+  documentService: DocumentService;
   worker: JobWorker;
   lifecycle: { shuttingDown: boolean };
 }
@@ -123,6 +125,7 @@ export function createContainer(
       logger: logger.child({ component: 'review-service' }),
       retentionDays: env.REVIEW_RETENTION_DAYS,
     }),
+    documentService: new DocumentService(),
     worker,
     lifecycle: { shuttingDown: false },
   };

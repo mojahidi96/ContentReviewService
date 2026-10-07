@@ -73,7 +73,7 @@ export function createApp(c: Container): Express {
         callback(null, origin === undefined || env.FRONTEND_ORIGIN.includes(origin));
       },
       credentials: true,
-      methods: ['GET', 'POST', 'PATCH', 'DELETE', 'OPTIONS'],
+      methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
       allowedHeaders: ['Content-Type', 'X-CSRF-Token', 'X-Request-Id', 'Last-Event-ID'],
       exposedHeaders: ['X-Request-Id', 'Location', 'RateLimit', 'RateLimit-Policy', 'Retry-After'],
       maxAge: 600,
