@@ -104,6 +104,16 @@ describe('review API', () => {
       .expect(202);
   });
 
+  it('accepts a review without categories (the service checks every issue type)', async () => {
+    const res = await alice
+      .post('/api/v1/reviews')
+      .set('X-CSRF-Token', aliceCsrf)
+      .send({ documentTitle: 'No categories', content: 'Please recieve it.' })
+      .expect(202);
+    const detail = await alice.get(`/api/v1/reviews/${res.body.reviewId as string}`).expect(200);
+    expect(detail.body.review.categories).toEqual([]);
+  });
+
   it('rejects oversized bodies with 413', async () => {
     const big = createTestApp({ env: { BODY_LIMIT: '1kb' } });
     const agent = newAgent(big.app);
@@ -141,9 +151,9 @@ describe('review API', () => {
     expect(review.findings.map((f: { category: string }) => f.category).sort()).toEqual([
       'grammar',
       'grammar',
-      'profanity',
       'spelling',
       'spelling',
+      'vulgarity',
     ]);
   });
 

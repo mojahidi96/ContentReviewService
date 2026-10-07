@@ -1,23 +1,23 @@
-import { codePointLength } from '../../shared/utils/offsets.js';
 import { sleep } from '../../shared/utils/backoff.js';
+import { sha256Hex } from '../../shared/utils/hash.js';
 import type { PythonLlmClient } from './llm-client.js';
 import { LlmAbortedError } from './llm.errors.js';
 import type {
-  AnalysisChunk,
-  AnalysisRequest,
-  AnalyzeOptions,
-  FindingCategory,
+  ContentReviewIssue,
+  ContentReviewRequest,
+  ContentReviewResponse,
   FindingSeverity,
-  LlmFinding,
+  IssueType,
   LlmHealth,
+  ReviewContentOptions,
 } from './llm.types.js';
 
 interface Rule {
-  category: FindingCategory;
+  issueType: IssueType;
   severity: FindingSeverity;
   pattern: RegExp;
   suggest: (match: string) => string;
-  explanation: string;
+  suggestion: string;
 }
 
 const SPELLING: Record<string, string> = {
@@ -33,71 +33,98 @@ const SPELLING: Record<string, string> = {
 
 const RULES: Rule[] = [
   {
-    category: 'spelling',
+    issueType: 'spelling',
     severity: 'low',
     pattern: new RegExp(`\\b(${Object.keys(SPELLING).join('|')})\\b`, 'gi'),
-    suggest: (m) => SPELLING[m.toLowerCase()] ?? m,
-    explanation: 'This word appears to be misspelled.',
+    suggest: (m) => matchCase(m, SPELLING[m.toLowerCase()] ?? m),
+    suggestion: 'Correct the spelling mistake.',
   },
   {
-    category: 'grammar',
+    issueType: 'grammar',
     severity: 'medium',
     pattern: /\b(report|it|he|she|this|that) have\b/gi,
     suggest: (m) => m.replace(/have$/i, 'has'),
-    explanation: 'The verb should agree with a singular subject.',
+    suggestion: 'The verb should agree with a singular subject.',
   },
   {
-    category: 'grammar',
+    issueType: 'grammar',
     severity: 'medium',
     pattern: /\b(several|many|few|two|three) (mistake|error|issue)\b/gi,
     suggest: (m) => `${m}s`,
-    explanation: 'A plural quantifier requires a plural noun.',
+    suggestion: 'A plural quantifier requires a plural noun.',
   },
   {
-    category: 'profanity',
+    issueType: 'vulgarity',
     severity: 'high',
     pattern: /\b(damn|crap|bloody)\b/gi,
     suggest: () => '',
-    explanation: 'This word may be considered offensive in a professional context.',
+    suggestion: 'This word may be considered offensive in a professional context.',
   },
 ];
 
-/** Deterministic, rule-based analysis used for local development (offsets in code points). */
-export function analyzeWithRules(content: string, categories: FindingCategory[]): LlmFinding[] {
-  const findings: LlmFinding[] = [];
+/** Characters of context sent on each side of an issue, like the Python service. */
+const CONTEXT_CHARS = 20;
+
+function matchCase(source: string, replacement: string): string {
+  const first = source.charAt(0);
+  return first !== first.toLowerCase()
+    ? replacement.charAt(0).toUpperCase() + replacement.slice(1)
+    : replacement;
+}
+
+/** Deterministic, rule-based analysis used for local development. Issues are in document order. */
+export function analyzeWithRules(content: string): ContentReviewIssue[] {
+  const matches: { index: number; rule: Rule; text: string }[] = [];
   for (const rule of RULES) {
-    if (!categories.includes(rule.category)) continue;
     for (const match of content.matchAll(rule.pattern)) {
-      const startOffset = codePointLength(content.slice(0, match.index));
-      findings.push({
-        category: rule.category,
-        severity: rule.severity,
-        originalText: match[0],
-        suggestedText: rule.suggest(match[0]),
-        explanation: rule.explanation,
-        startOffset,
-        endOffset: startOffset + codePointLength(match[0]),
-      });
+      matches.push({ index: match.index, rule, text: match[0] });
     }
   }
-  return findings.sort((a, b) => a.startOffset - b.startOffset);
+  return matches
+    .sort((a, b) => a.index - b.index)
+    .map(({ index, rule, text }) => {
+      const end = index + text.length;
+      return {
+        id: `issue-${sha256Hex(`${index}:${rule.issueType}:${text}`).slice(0, 12)}`,
+        issueType: rule.issueType,
+        severity: rule.severity,
+        original: text,
+        improved: rule.suggest(text),
+        suggestion: rule.suggestion,
+        location: {
+          prefix: safeSlice(content, Math.max(0, index - CONTEXT_CHARS), index),
+          suffix: safeSlice(content, end, end + CONTEXT_CHARS),
+        },
+      };
+    });
+}
+
+/** Slice that never splits a surrogate pair at either edge. */
+function safeSlice(text: string, start: number, end: number): string {
+  if (start > 0 && isLowSurrogate(text.charCodeAt(start))) start++;
+  if (end < text.length && isLowSurrogate(text.charCodeAt(end))) end--;
+  return text.slice(start, Math.max(start, end));
+}
+
+function isLowSurrogate(code: number): boolean {
+  return code >= 0xdc00 && code <= 0xdfff;
 }
 
 export type MockHandler = (
-  request: AnalysisRequest,
+  request: ContentReviewRequest,
   callNumber: number,
-) => LlmFinding[] | Promise<LlmFinding[]>;
+) => ContentReviewIssue[] | Promise<ContentReviewIssue[]>;
 
 export interface MockPythonLlmClientOptions {
   delayMs?: number;
-  /** Override behavior per call (return findings or throw an LlmError). */
+  /** Override behavior per call (return issues or throw an LlmError). */
   handler?: MockHandler;
   healthy?: boolean;
 }
 
-/** In-process stand-in for the Python worker. Never used in production (enforced by env validation). */
+/** In-process stand-in for the Python service. Never used in production (enforced by env validation). */
 export class MockPythonLlmClient implements PythonLlmClient {
-  calls: AnalysisRequest[] = [];
+  calls: ContentReviewRequest[] = [];
 
   constructor(private options: MockPythonLlmClientOptions = {}) {}
 
@@ -105,14 +132,22 @@ export class MockPythonLlmClient implements PythonLlmClient {
     this.options = { ...this.options, handler };
   }
 
-  async *analyze(req: AnalysisRequest, opts: AnalyzeOptions = {}): AsyncIterable<AnalysisChunk> {
+  async reviewContent(
+    req: ContentReviewRequest,
+    opts: ReviewContentOptions = {},
+  ): Promise<ContentReviewResponse> {
     this.calls.push(req);
     if (this.options.delayMs) await sleep(this.options.delayMs, opts.signal);
     if (opts.signal?.aborted) throw new LlmAbortedError('Mock analysis aborted');
-    const findings = this.options.handler
+    const issues = this.options.handler
       ? await this.options.handler(req, this.calls.length)
-      : analyzeWithRules(req.content, req.categories);
-    yield { type: 'result', findings, model: 'mock-rules-v1' };
+      : analyzeWithRules(req.content);
+    return {
+      requestId: req.requestId,
+      issues,
+      model: 'mock-rules-v2',
+      usage: { inputTokens: null, outputTokens: null },
+    };
   }
 
   checkHealth(): Promise<LlmHealth> {

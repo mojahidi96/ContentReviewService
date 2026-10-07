@@ -4,18 +4,26 @@ import type { PythonLlmClient } from './llm-client.js';
 import {
   LlmAbortedError,
   LlmBadResponseError,
+  LlmContentTooLargeError,
   LlmError,
   LlmRateLimitedError,
   LlmRejectedError,
   LlmTimeoutError,
   LlmUnavailableError,
 } from './llm.errors.js';
-import { analysisResponseSchema, pythonErrorBodySchema } from './llm.schemas.js';
-import type { AnalysisChunk, AnalysisRequest, AnalyzeOptions, LlmHealth } from './llm.types.js';
+import { contentReviewResponseSchema, pythonErrorBodySchema } from './llm.schemas.js';
+import type {
+  ContentReviewRequest,
+  ContentReviewResponse,
+  LlmHealth,
+  ReviewContentOptions,
+} from './llm.types.js';
 
 export const ANALYZE_PATH = '/internal/v1/content-reviews';
 export const HEALTH_PATH = '/internal/v1/health';
 const MAX_RESPONSE_BYTES = 5 * 1024 * 1024;
+/** Retries allowed for a 503 (LLM_PROVIDER_UNAVAILABLE, AI_CONCURRENCY_LIMIT). */
+const UNAVAILABLE_MAX_RETRIES = 2;
 
 export interface HttpPythonLlmClientOptions {
   baseUrl: string;
@@ -65,7 +73,10 @@ export class HttpPythonLlmClient implements PythonLlmClient {
     });
   }
 
-  async *analyze(req: AnalysisRequest, opts: AnalyzeOptions = {}): AsyncIterable<AnalysisChunk> {
+  async reviewContent(
+    req: ContentReviewRequest,
+    opts: ReviewContentOptions = {},
+  ): Promise<ContentReviewResponse> {
     const timeoutSignal = AbortSignal.timeout(this.options.timeoutMs);
     const signal = opts.signal ? AbortSignal.any([opts.signal, timeoutSignal]) : timeoutSignal;
 
@@ -79,14 +90,13 @@ export class HttpPythonLlmClient implements PythonLlmClient {
           'content-type': 'application/json',
           accept: 'application/json',
           authorization: `Bearer ${this.options.serviceToken}`,
-          'idempotency-key': req.requestId,
           ...(opts.correlationId ? { 'x-request-id': opts.correlationId } : {}),
         },
+        // Python rejects unknown fields with 422, so send exactly the documented ones.
         body: JSON.stringify({
           requestId: req.requestId,
           content: req.content,
-          categories: req.categories,
-          language: req.language,
+          ...(req.language === undefined ? {} : { language: req.language }),
         }),
       });
     } catch (err) {
@@ -96,10 +106,7 @@ export class HttpPythonLlmClient implements PythonLlmClient {
     const text = await this.readBody(response, opts.signal);
     const status = response.statusCode;
 
-    if (status >= 200 && status < 300) {
-      yield this.parseSuccess(text, req.requestId);
-      return;
-    }
+    if (status >= 200 && status < 300) return this.parseSuccess(text, req.requestId);
     throw this.mapStatusError(status, text, response.headers['retry-after']);
   }
 
@@ -152,14 +159,14 @@ export class HttpPythonLlmClient implements PythonLlmClient {
     return Buffer.concat(chunks).toString('utf8');
   }
 
-  private parseSuccess(text: string, requestId: string): AnalysisChunk {
+  private parseSuccess(text: string, requestId: string): ContentReviewResponse {
     let json: unknown;
     try {
       json = JSON.parse(text);
     } catch (err) {
       throw new LlmBadResponseError('Python response is not valid JSON', { cause: err });
     }
-    const parsed = analysisResponseSchema.safeParse(json);
+    const parsed = contentReviewResponseSchema.safeParse(json);
     if (!parsed.success) {
       // Log only the paths/codes of the violations, never values (they may contain content).
       const violations = parsed.error.issues
@@ -171,7 +178,7 @@ export class HttpPythonLlmClient implements PythonLlmClient {
     if (parsed.data.requestId !== requestId) {
       throw new LlmBadResponseError('Python response requestId mismatch');
     }
-    return { type: 'result', findings: parsed.data.findings, model: parsed.data.model };
+    return parsed.data;
   }
 
   private mapStatusError(
@@ -187,16 +194,34 @@ export class HttpPythonLlmClient implements PythonLlmClient {
       // Non-JSON error bodies are fine; the status code drives classification.
     }
     const detail = `Python service responded ${status}${upstreamCode ? ` (${upstreamCode})` : ''}`;
+    const retryAfterMs = parseRetryAfter(retryAfter);
+    const retryAfterOpt = retryAfterMs === undefined ? {} : { retryAfterMs };
 
-    if (status === 429) {
-      const retryAfterMs = parseRetryAfter(retryAfter);
-      return new LlmRateLimitedError(detail, retryAfterMs === undefined ? {} : { retryAfterMs });
+    switch (status) {
+      case 401:
+        // Never log the token itself; only that it was refused.
+        this.options.logger.error(
+          'Python service rejected our credential; check INTERNAL_SERVICE_TOKEN',
+        );
+        return new LlmRejectedError(detail, status, upstreamCode);
+      case 413:
+        return new LlmContentTooLargeError(detail);
+      case 429:
+        return new LlmRateLimitedError(detail, retryAfterOpt);
+      case 408:
+      case 504:
+        return new LlmTimeoutError(detail);
+      case 502:
+        return upstreamCode === 'INVALID_MODEL_OUTPUT'
+          ? new LlmBadResponseError(detail)
+          : new LlmUnavailableError(detail, retryAfterOpt);
+      case 503:
+        return new LlmUnavailableError(detail, {
+          ...retryAfterOpt,
+          maxRetries: UNAVAILABLE_MAX_RETRIES,
+        });
     }
-    if (status === 408 || status === 504) return new LlmTimeoutError(detail);
-    if (status >= 500) {
-      const retryAfterMs = parseRetryAfter(retryAfter);
-      return new LlmUnavailableError(detail, retryAfterMs === undefined ? {} : { retryAfterMs });
-    }
+    if (status >= 500) return new LlmUnavailableError(detail, retryAfterOpt);
     return new LlmRejectedError(detail, status, upstreamCode);
   }
 

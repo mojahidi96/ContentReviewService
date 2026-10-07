@@ -75,8 +75,8 @@ names (never their values). See [`.env.example`](.env.example) for every setting
 
 ### Python LLM service
 
-Set `PYTHON_LLM_MODE=http`, `PYTHON_LLM_SERVICE_URL` (e.g. `http://localhost:8000`) and a
-`PYTHON_LLM_SERVICE_TOKEN` (≥ 16 chars) that the Python service also accepts. The service must
+Set `PYTHON_LLM_MODE=http`, `AI_SERVICE_BASE_URL` (e.g. `http://localhost:8000`) and an
+`INTERNAL_SERVICE_TOKEN` (≥ 16 chars) that the Python service also accepts. The service must
 implement `POST /internal/v1/content-reviews` and `GET /internal/v1/health` as described in
 [`docs/python-service-contract.md`](docs/python-service-contract.md). If it is down, reviews
 stay queued and are retried with backoff; `/health/ready` reports `degraded`.
@@ -172,7 +172,7 @@ npm test
 
 ```bash
 docker compose up --build                          # MongoDB + API (mock LLM by default)
-PYTHON_LLM_MODE=http PYTHON_LLM_SERVICE_TOKEN=... docker compose up --build   # real Python service on the host
+PYTHON_LLM_MODE=http INTERNAL_SERVICE_TOKEN=... docker compose up --build   # real Python service on the host
 docker compose --profile worker up --build         # add a dedicated worker container
 ```
 
@@ -221,7 +221,7 @@ JSON in `observability/grafana/dashboards/` can be imported into any Grafana.
 
 - `NODE_ENV=production` enforces: `AUTH_COOKIE_SECURE=true`, https-only `FRONTEND_ORIGIN`,
   non-placeholder secrets, distinct JWT/CSRF secrets, `PYTHON_LLM_MODE=http`.
-- Load secrets (`AUTH_JWT_SECRET`, `CSRF_SECRET`, `PYTHON_LLM_SERVICE_TOKEN`, MongoDB
+- Load secrets (`AUTH_JWT_SECRET`, `CSRF_SECRET`, `INTERNAL_SERVICE_TOKEN`, MongoDB
   credentials) from a secret manager. Rotating `AUTH_JWT_SECRET` logs everyone out.
 - Terminate TLS at a proxy and set `TRUST_PROXY` (e.g. `1`) so rate limiting sees client IPs.
 - Serve UI and API from the same site (keep `SameSite=Lax`), or use `SameSite=None; Secure` for

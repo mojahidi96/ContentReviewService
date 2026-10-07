@@ -4,53 +4,96 @@ import {
   isRetryableError,
   LlmAbortedError,
   LlmBadResponseError,
+  LlmContentTooLargeError,
   LlmRateLimitedError,
   LlmRejectedError,
   LlmTimeoutError,
   LlmUnavailableError,
+  shouldRetry,
 } from '../../src/integrations/python-llm/llm.errors.js';
 import {
-  analysisResponseSchema,
+  contentReviewResponseSchema,
   LLM_LIMITS,
 } from '../../src/integrations/python-llm/llm.schemas.js';
 import { computeBackoffMs } from '../../src/shared/utils/backoff.js';
-import { sliceByCodePoints } from '../../src/shared/utils/offsets.js';
-import { validAnalysisResponse } from '../fixtures/python-responses.js';
+import { validContentReviewResponse } from '../fixtures/python-responses.js';
 
 describe('Python response schema', () => {
-  it('accepts the documented example and its offsets reference the request content', () => {
-    const parsed = analysisResponseSchema.parse(validAnalysisResponse('r1'));
-    for (const f of parsed.findings) {
-      expect(
-        sliceByCodePoints('The report have several mistake.', f.startOffset, f.endOffset),
-      ).toBe(f.originalText);
+  it('accepts the documented example', () => {
+    const body = {
+      requestId: 'review_123',
+      issues: [
+        {
+          id: 'issue-3f9a1c2b7d10',
+          issueType: 'spelling',
+          severity: 'low',
+          original: 'recieve',
+          improved: 'receive',
+          suggestion: 'Correct the spelling mistake.',
+          location: { prefix: 'Please ', suffix: ' the document.' },
+        },
+      ],
+      model: 'gemini-2.5-flash',
+      usage: { inputTokens: null, outputTokens: null },
+    };
+    expect(contentReviewResponseSchema.parse(body)).toEqual(body);
+  });
+
+  it('strips unknown fields (forward compatible)', () => {
+    const body = validContentReviewResponse('r1');
+    const parsed = contentReviewResponseSchema.parse({
+      ...body,
+      newTopLevelField: 1,
+      issues: [{ ...body.issues[0], confidence: 0.9 }],
+    });
+    expect(parsed).not.toHaveProperty('newTopLevelField');
+    expect(parsed.issues[0]).not.toHaveProperty('confidence');
+  });
+
+  it('accepts every documented issue type and empty prefix/suffix', () => {
+    const body = validContentReviewResponse('r1');
+    for (const issueType of [
+      'spelling',
+      'grammar',
+      'typo',
+      'punctuation',
+      'clarity',
+      'slang',
+      'vulgarity',
+      'deprecated_term',
+      'inappropriate_language',
+    ]) {
+      const issues = [{ ...body.issues[0], issueType, location: { prefix: '', suffix: '' } }];
+      expect(contentReviewResponseSchema.safeParse({ ...body, issues }).success).toBe(true);
     }
   });
 
-  it('strips unknown fields (forward compatible) and allows a missing model', () => {
-    const { model: _model, ...rest } = validAnalysisResponse('r1');
-    const parsed = analysisResponseSchema.parse({ ...rest, newTopLevelField: 1 });
-    expect(parsed).not.toHaveProperty('newTopLevelField');
-  });
-
   it.each([
-    ['empty originalText', { originalText: '' }],
-    ['empty explanation', { explanation: '' }],
-    ['float offset', { startOffset: 1.5 }],
-    ['zero endOffset', { endOffset: 0 }],
+    ['empty original', { original: '' }],
+    ['empty suggestion', { suggestion: '' }],
+    ['empty id', { id: '' }],
     ['unknown severity', { severity: 'critical' }],
-    ['overlong explanation', { explanation: 'x'.repeat(LLM_LIMITS.maxExplanation + 1) }],
-    ['lone surrogate', { suggestedText: '\ud800' }],
+    ['unknown issueType', { issueType: 'profanity' }],
+    ['overlong suggestion', { suggestion: 'x'.repeat(LLM_LIMITS.maxSuggestion + 1) }],
+    ['lone surrogate', { improved: '\ud800' }],
+    ['missing location', { location: undefined }],
   ])('rejects %s', (_name, override) => {
-    const body = validAnalysisResponse('r1');
-    const bad = { ...body, findings: [{ ...body.findings[0], ...override }] };
-    expect(analysisResponseSchema.safeParse(bad).success).toBe(false);
+    const body = validContentReviewResponse('r1');
+    const bad = { ...body, issues: [{ ...body.issues[0], ...override }] };
+    expect(contentReviewResponseSchema.safeParse(bad).success).toBe(false);
   });
 
-  it('caps the number of findings', () => {
-    const body = validAnalysisResponse('r1');
-    const many = { ...body, findings: Array(LLM_LIMITS.maxFindings + 1).fill(body.findings[0]) };
-    expect(analysisResponseSchema.safeParse(many).success).toBe(false);
+  it('requires model and usage', () => {
+    const { model: _m, ...noModel } = validContentReviewResponse('r1');
+    const { usage: _u, ...noUsage } = validContentReviewResponse('r1');
+    expect(contentReviewResponseSchema.safeParse(noModel).success).toBe(false);
+    expect(contentReviewResponseSchema.safeParse(noUsage).success).toBe(false);
+  });
+
+  it('caps the number of issues', () => {
+    const body = validContentReviewResponse('r1');
+    const many = { ...body, issues: Array(LLM_LIMITS.maxIssues + 1).fill(body.issues[0]) };
+    expect(contentReviewResponseSchema.safeParse(many).success).toBe(false);
   });
 });
 
@@ -62,9 +105,36 @@ describe('retry decisions', () => {
     [new LlmBadResponseError('b'), true],
     [new LlmAbortedError('a'), true],
     [new LlmRejectedError('x', 400), false],
+    [new LlmContentTooLargeError('x'), false],
     [new Error('db blip'), true],
   ])('%o retryable=%s', (err, expected) => {
     expect(isRetryableError(err)).toBe(expected);
+  });
+
+  // attempt is 1-based: attempt N failing means N-1 retries have been used.
+  it.each([
+    ['INVALID_MODEL_OUTPUT retries once', new LlmBadResponseError('b'), [true, false]],
+    [
+      '503 retries at most twice',
+      new LlmUnavailableError('u', { maxRetries: 2 }),
+      [true, true, false],
+    ],
+    [
+      'quota exhaustion uses the job budget',
+      new LlmRateLimitedError('r'),
+      [true, true, true, false],
+    ],
+    [
+      'transport failures use the job budget',
+      new LlmUnavailableError('u'),
+      [true, true, true, false],
+    ],
+    ['401/422 never retry', new LlmRejectedError('x', 401), [false]],
+    ['413 never retries', new LlmContentTooLargeError('x'), [false]],
+  ])('%s', (_name, err, expected) => {
+    const maxAttempts = 4;
+    const decisions = expected.map((_, i) => shouldRetry(err, i + 1, maxAttempts));
+    expect(decisions).toEqual(expected);
   });
 
   it('exposes safe public messages and stable codes', () => {

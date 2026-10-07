@@ -1,16 +1,20 @@
-# Python LLM Service — Internal Integration Contract (v1)
+# Python AI Service — Internal Integration Contract
 
-This document defines the private HTTP contract between **ContentReviewService (Node.js)** and
-the separately deployed **Python LLM service** (FastAPI). The Python repository implements
-this contract; Node.js depends only on what is written here.
+This document describes the private HTTP contract between **ContentReviewService (Node.js)** and
+the separately deployed **Python AI service**. The Python repository owns and implements this
+contract; this file records what Node.js relies on.
 
-- The Python service owns prompts, OpenAI calls, model selection and **its own** output validation.
+- The Python service owns prompts, model calls, model selection and **its own** output validation.
 - Node.js owns auth, persistence, orchestration, retries, SSE, and **independently re-validates**
   every response before persisting anything.
 - The browser never calls the Python service. It must not be exposed publicly.
 
 Node-side implementation: `src/integrations/python-llm/` (`llm.schemas.ts` is the executable
-form of this contract).
+form of this contract) and `src/modules/reviews/issue-locator.ts` (placing issues in the text).
+
+> **Revision 2.** The request no longer has `categories`, and the response returns `issues`
+> anchored by surrounding text instead of `findings` with character offsets. The path is
+> unchanged.
 
 ---
 
@@ -18,224 +22,166 @@ form of this contract).
 
 | Item     | Value                                                                                                                                 |
 | -------- | ------------------------------------------------------------------------------------------------------------------------------------- |
-| Base URL | `PYTHON_LLM_SERVICE_URL` (e.g. `http://python-llm:8000`)                                                                              |
-| Protocol | HTTP/1.1, JSON (`Content-Type: application/json; charset=utf-8`)                                                                      |
-| Auth     | `Authorization: Bearer <PYTHON_LLM_SERVICE_TOKEN>` on **every** request                                                               |
+| Base URL | `AI_SERVICE_BASE_URL` (e.g. `http://python-ai:8000`)                                                                                  |
+| Protocol | HTTP/1.1, JSON (`Content-Type: application/json`)                                                                                     |
+| Auth     | `Authorization: Bearer <INTERNAL_SERVICE_TOKEN>` on **every** request                                                                 |
 | Network  | Private network only (cluster-internal service / VPC). Use TLS (`https://`) whenever traffic leaves a trusted host or network segment |
 
-The Python service **must** reject missing/invalid tokens with `401` (compare in constant time).
-The token is a shared secret provisioned to both services via a secret manager; rotate by
-accepting two tokens on the Python side during the rollover window. mTLS or signed service
-identities (e.g. a service mesh) are drop-in upgrades and do not change this contract.
+The token is a shared secret provisioned to both services via a secret manager. Node.js never
+logs it.
 
 ### Request headers sent by Node.js
 
-| Header            | Meaning                                                                      |
-| ----------------- | ---------------------------------------------------------------------------- |
-| `Authorization`   | `Bearer <token>`                                                             |
-| `Idempotency-Key` | Equals `requestId` (the review id). Same key ⇒ same logical request          |
-| `X-Request-Id`    | Correlation id for logs (currently the review id). Log it; never log content |
-| `Content-Type`    | `application/json`                                                           |
-| `Accept`          | `application/json`                                                           |
+| Header          | Meaning                                                                      |
+| --------------- | ---------------------------------------------------------------------------- |
+| `Authorization` | `Bearer <token>`                                                             |
+| `X-Request-ID`  | Correlation id for logs (currently the review id). Log it; never log content |
+| `Content-Type`  | `application/json`                                                           |
+| `Accept`        | `application/json`                                                           |
 
 ---
 
 ## 2. `POST /internal/v1/content-reviews`
 
-Analyze content and return **the complete, validated** list of findings in one response.
+Reviews the content and returns the complete list of issues in one (synchronous, LLM-backed)
+response.
 
 ### Request
 
 ```json
 {
   "requestId": "6720f1c2a4b5c6d7e8f90123",
-  "content": "The report have several mistake.",
-  "categories": ["grammar", "spelling", "profanity"],
+  "content": "Please recieve the document.",
   "language": "en"
 }
 ```
 
-| Field        | Type     | Rules                                                                                                                                             |
-| ------------ | -------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `requestId`  | string   | Opaque, stable per review. Must be echoed in the response                                                                                         |
-| `content`    | string   | 1–50 000 Unicode code points (Node enforces `REVIEW_MAX_CONTENT_CHARS`). Well-formed UTF-8. Do **not** trim or normalize before computing offsets |
-| `categories` | string[] | Non-empty unique subset of `grammar`, `spelling`, `profanity`. Only return findings in these categories                                           |
-| `language`   | string   | BCP-47 language tag. Currently always `"en"`                                                                                                      |
+| Field       | Type   | Rules                                                               |
+| ----------- | ------ | ------------------------------------------------------------------- |
+| `requestId` | string | 1–128 chars. Node sends the review id. Echoed in the response       |
+| `content`   | string | 1–100 000 chars. Node sends the stored content exactly as submitted |
+| `language`  | string | Optional, default `"en"`. Node currently omits it                   |
 
-Python must ignore unknown request fields (Node may add optional fields in v1).
+**No other fields are allowed**: Python answers `422 INVALID_REQUEST` to unknown fields, so Node
+sends exactly these. Every issue type is always checked; there is no category filter.
 
 ### Success response — `200 OK`
 
 ```json
 {
   "requestId": "6720f1c2a4b5c6d7e8f90123",
-  "offsetUnit": "codepoint",
-  "model": "gpt-4.1-mini-2026-xx-xx",
-  "findings": [
+  "issues": [
     {
-      "category": "grammar",
-      "severity": "medium",
-      "originalText": "report have",
-      "suggestedText": "report has",
-      "explanation": "The verb should agree with a singular subject.",
-      "startOffset": 4,
-      "endOffset": 15
-    },
-    {
-      "category": "grammar",
-      "severity": "medium",
-      "originalText": "several mistake",
-      "suggestedText": "several mistakes",
-      "explanation": "A plural quantifier requires a plural noun.",
-      "startOffset": 16,
-      "endOffset": 31
+      "id": "issue-3f9a1c2b7d10",
+      "issueType": "spelling",
+      "severity": "low",
+      "original": "recieve",
+      "improved": "receive",
+      "suggestion": "Correct the spelling mistake.",
+      "location": { "prefix": "Please ", "suffix": " the document." }
     }
-  ]
+  ],
+  "model": "gemini-...",
+  "usage": { "inputTokens": null, "outputTokens": null }
 }
 ```
 
-| Field        | Type          | Rules                                                    |
-| ------------ | ------------- | -------------------------------------------------------- |
-| `requestId`  | string        | **Must equal** the request's `requestId`                 |
-| `offsetUnit` | `"codepoint"` | Literal. Guards against offset-convention mismatches     |
-| `model`      | string?       | Optional, ≤ 200 chars. Model identifier, for diagnostics |
-| `findings`   | Finding[]     | 0–1000 items. An empty array means "no issues"           |
+| Field       | Type    | Node.js validation                                 |
+| ----------- | ------- | -------------------------------------------------- |
+| `requestId` | string  | **Must equal** the request's `requestId`           |
+| `issues`    | Issue[] | 0–1000 items, in document order. `[]` = no issues  |
+| `model`     | string  | ≤ 200 chars, logged for diagnostics                |
+| `usage`     | object  | `inputTokens`, `outputTokens`: integer ≥ 0 or null |
 
-**Finding**
+**Issue**
 
-| Field           | Type    | Rules                                                                 |
-| --------------- | ------- | --------------------------------------------------------------------- |
-| `category`      | enum    | `grammar` \| `spelling` \| `profanity` (must be one of the requested) |
-| `severity`      | enum    | `low` \| `medium` \| `high`                                           |
-| `originalText`  | string  | 1–10 000 chars; **exactly** `content[startOffset:endOffset]`          |
-| `suggestedText` | string  | 0–10 000 chars (`""` allowed, e.g. "remove this word")                |
-| `explanation`   | string  | 1–2 000 chars, user-facing, plain text (no HTML/Markdown)             |
-| `startOffset`   | integer | ≥ 0, code points, inclusive                                           |
-| `endOffset`     | integer | > `startOffset`, ≤ `len(content)`, code points, exclusive             |
+| Field             | Type   | Node.js validation                                                                                                                         |
+| ----------------- | ------ | ------------------------------------------------------------------------------------------------------------------------------------------ |
+| `id`              | string | 1–200 chars, generated by Python (not stored; Node assigns its own stable `findingId`)                                                     |
+| `issueType`       | enum   | `spelling` \| `grammar` \| `typo` \| `punctuation` \| `clarity` \| `slang` \| `vulgarity` \| `deprecated_term` \| `inappropriate_language` |
+| `severity`        | enum   | `low` \| `medium` \| `high`                                                                                                                |
+| `original`        | string | 1–10 000 chars; text found in `content`                                                                                                    |
+| `improved`        | string | 0–10 000 chars (`""` allowed, e.g. "remove this word")                                                                                     |
+| `suggestion`      | string | 1–2 000 chars, user-facing explanation                                                                                                     |
+| `location.prefix` | string | 0–2 000 chars of text immediately before `original` (empty at the start of the content)                                                    |
+| `location.suffix` | string | 0–2 000 chars of text immediately after `original` (empty at the end of the content)                                                       |
 
-All strings must be well-formed Unicode (no lone surrogates).
-
-### Offset semantics (critical)
-
-Offsets are **Unicode code point indexes** with half-open ranges — exactly Python `str` indexing:
-
-```python
-assert content[f.start_offset:f.end_offset] == f.original_text
-```
-
-Do **not** use UTF-8 byte offsets, UTF-16 offsets, or grapheme-cluster indexes. LLMs are bad at
-counting characters: the Python service should locate `originalText` in `content` itself (e.g.
-search near the model's suggested position) and compute offsets programmatically, dropping
-findings it cannot anchor.
-
-| `content`       | `len()` | `"wrld"` → `[start, end)` |
-| --------------- | ------- | ------------------------- |
-| `"Hi wrld"`     | 7       | `[3, 7)`                  |
-| `"Hi 😀 wrld"`  | 9       | `[5, 9)`                  |
-| `"Hi 👋🏽 wrld"`  | 10      | `[6, 10)`                 |
-| `"日本語 wrld"` | 8       | `[4, 8)`                  |
+All strings must be well-formed Unicode (no lone surrogates). Unknown response fields are
+ignored, so Python may add optional fields at any time.
 
 ### What Node.js does with the response
 
 1. Validates the JSON against the schema above. **Any** violation (missing field, wrong type,
-   unknown enum, `offsetUnit` ≠ `codepoint`, `requestId` mismatch, size limits) rejects the
-   whole response as `LLM_INVALID_RESPONSE`.
-2. For each finding, verifies the category was requested and that the offsets reference
-   exactly `originalText`. Findings failing these checks are **dropped individually** (counted
-   in logs), and the rest are kept.
-3. Collapses duplicates (same category + range + text) and assigns stable `findingId`s.
-4. Persists, then publishes SSE events.
-
-Unknown **response** fields are ignored, so Python may add optional fields at any time.
+   unknown enum, `requestId` mismatch, size limits) rejects the whole response as
+   `LLM_INVALID_RESPONSE` (retried once).
+2. Places each issue in the stored content (`issue-locator.ts`): among the occurrences of
+   `original`, it picks the one preceded by `prefix` and followed by `suffix`. Ties go to the
+   first occurrence at or after the previous issue (issues are in document order). If no
+   occurrence matches the context exactly, the one whose surroundings agree most is used and
+   the issue is counted as approximate. Issues whose `original` is not in the content at all are
+   dropped (Python already drops these, so it only happens if the content changed).
+3. Converts the placement to **Unicode code point** offsets `[startOffset, endOffset)`, which the
+   public API and the UI use for highlighting.
+4. Maps fields to findings: `issueType` → `category`, `original` → `originalText`,
+   `improved` → `suggestedText`, `suggestion` → `explanation`. Collapses duplicates (same
+   category + range + text) and assigns stable `findingId`s.
+5. Persists, then publishes SSE events. Logs only counts (placed, approximate, not found,
+   duplicates), the model and token usage — never content or issue text.
 
 ---
 
 ## 3. Errors
 
-Error responses use:
+Error responses use `{ "error": { "code", "message", "requestId" } }`. Node.js classifies by
+HTTP status (and `code` where noted) and logs the code, never the message body.
 
-```json
-{ "error": { "code": "UPSTREAM_TIMEOUT", "message": "Human-readable, no content" } }
-```
+| Status    | `code`                                             | Node.js behavior                                                              | Review `errorCode`         |
+| --------- | -------------------------------------------------- | ----------------------------------------------------------------------------- | -------------------------- |
+| 401       | `UNAUTHORIZED`                                     | Configuration bug: fail, **no retry**, log an error                           | `LLM_REQUEST_REJECTED`     |
+| 413       | `CONTENT_TOO_LARGE`                                | Fail, no retry ("shorten the content")                                        | `LLM_CONTENT_TOO_LARGE`    |
+| 422       | `INVALID_REQUEST`                                  | Bug in our payload: fail, no retry                                            | `LLM_REQUEST_REJECTED`     |
+| 429       | `LLM_QUOTA_EXHAUSTED`                              | Back off (honoring `Retry-After`) within `JOB_MAX_ATTEMPTS`, then "try later" | `LLM_SERVICE_RATE_LIMITED` |
+| 502       | `INVALID_MODEL_OUTPUT`                             | Retry **once**                                                                | `LLM_INVALID_RESPONSE`     |
+| 503       | `LLM_PROVIDER_UNAVAILABLE`, `AI_CONCURRENCY_LIMIT` | Retry with backoff, **at most 2** retries                                     | `LLM_SERVICE_UNAVAILABLE`  |
+| 408/504   | any                                                | Retry with backoff within `JOB_MAX_ATTEMPTS`                                  | `LLM_SERVICE_TIMEOUT`      |
+| other 4xx | any                                                | Fail, no retry                                                                | `LLM_REQUEST_REJECTED`     |
+| other 5xx | any                                                | Retry with backoff within `JOB_MAX_ATTEMPTS`                                  | `LLM_SERVICE_UNAVAILABLE`  |
 
-`message` must never contain the submitted content or prompts. Node.js classifies by HTTP
-status; `code` is logged for diagnostics.
-
-| Status      | Suggested `code`                                                 | Node.js behavior                                    |
-| ----------- | ---------------------------------------------------------------- | --------------------------------------------------- |
-| 400         | `INVALID_REQUEST`                                                | Fail review, **no retry**                           |
-| 401/403     | `UNAUTHORIZED`                                                   | Fail review, no retry (configuration error — alert) |
-| 413         | `CONTENT_TOO_LARGE`                                              | Fail review, no retry                               |
-| 422         | `UNSUPPORTED_LANGUAGE`, `VALIDATION_ERROR`                       | Fail review, no retry                               |
-| 408/504     | `UPSTREAM_TIMEOUT`                                               | Retry with backoff                                  |
-| 429         | `RATE_LIMITED`                                                   | Retry, waiting at least `Retry-After`               |
-| 500/502/503 | `INTERNAL_ERROR`, `UPSTREAM_UNAVAILABLE`, `MODEL_OUTPUT_INVALID` | Retry with backoff (`Retry-After` honored if sent)  |
-
-Use `429` (with `Retry-After: <seconds>`) when OpenAI rate-limits you or your own concurrency
-limit is reached. If the model returns output that fails your validation after your own
-internal attempts, respond `502 MODEL_OUTPUT_INVALID` rather than returning partial garbage.
-
-A `200` whose body is not valid JSON or violates the schema is treated as retryable
-`LLM_INVALID_RESPONSE`.
+Network failures (refused, reset, DNS) and timeouts are retried with backoff within
+`JOB_MAX_ATTEMPTS`.
 
 ---
 
-## 4. Timeouts, retries and idempotency
+## 4. Timeouts and retries
 
-| Setting                 | Default                             | Notes                                       |
-| ----------------------- | ----------------------------------- | ------------------------------------------- |
-| Connect timeout         | 5 s                                 | `PYTHON_LLM_CONNECT_TIMEOUT_MS`             |
-| Total request timeout   | 60 s                                | `PYTHON_LLM_TIMEOUT_MS` (headers + body)    |
-| Max attempts per review | 4                                   | `JOB_MAX_ATTEMPTS`                          |
-| Backoff                 | 2 s → 60 s, exponential with jitter | `JOB_BACKOFF_BASE_MS`, `JOB_BACKOFF_MAX_MS` |
-| Max response body       | 5 MB                                | Larger responses are rejected               |
+| Setting                 | Default                             | Notes                                         |
+| ----------------------- | ----------------------------------- | --------------------------------------------- |
+| Connect timeout         | 5 s                                 | `PYTHON_LLM_CONNECT_TIMEOUT_MS`               |
+| Total request timeout   | 60 s                                | `PYTHON_LLM_TIMEOUT_MS` (headers + body)      |
+| Max attempts per review | 4                                   | `JOB_MAX_ATTEMPTS`                            |
+| Backoff                 | 2 s → 60 s, exponential with jitter | `JOB_BACKOFF_BASE_MS`, `JOB_BACKOFF_MAX_MS`   |
+| Max response body       | 5 MB                                | Larger responses are rejected                 |
+| Max content             | 50 000 code points                  | `REVIEW_MAX_CONTENT_CHARS`, must be ≤ 100 000 |
 
-- Python should finish (or fail) **within the Node timeout**; set your OpenAI client timeout
-  below it (e.g. 45 s for a 60 s Node timeout). Node aborts the HTTP request on timeout; Python
-  should cancel the in-flight work when the client disconnects.
-- Node may send the **same `requestId` more than once** (retries, worker crash recovery,
-  duplicate delivery). Python must treat this as safe: either recompute, or cache by
-  `Idempotency-Key` and return the stored result. Node deduplicates findings regardless.
-- Node never retries `4xx` except `408` and `429`.
+- Retries are durable: a failed attempt is rescheduled in the MongoDB job queue (surviving
+  restarts) and the UI sees a `review.progress` event with stage `retrying`. Error-specific
+  limits (once for 502, twice for 503) apply on top of `JOB_MAX_ATTEMPTS`.
+- Node may send the **same `requestId` more than once** (retries, worker crash recovery).
+  Node deduplicates findings regardless.
 
 ---
 
 ## 5. `GET /internal/v1/health`
 
-Requires the same bearer token. Returns `200 {"status":"ok"}` when the service can accept
-work (it should not call OpenAI on every health check). Any non-2xx or a 3 s timeout is
-reported as `pythonLlm: "unavailable"` in Node's `/health/ready`, which degrades but does not
-fail readiness (reviews are queued durably and retried).
+Requires the same bearer token. A `2xx` within 3 s is reported as `pythonLlm: "ok"` in Node's
+`/health/ready`; anything else as `"unavailable"`, which degrades but does not fail readiness
+(reviews are queued durably and retried). Disable with `PYTHON_LLM_HEALTH_CHECK=false`.
 
 ---
 
-## 6. Versioning and compatibility
+## 6. Security and data handling
 
-- The version is in the path (`/internal/v1/...`). Breaking changes require `/internal/v2/`,
-  deployed alongside v1 until Node migrates.
-- **Non-breaking (allowed in v1):** new optional response fields; new optional request fields
-  (Python must ignore unknown request fields); new error `code` values.
-- **Breaking (requires v2):** removing/renaming fields; changing offset semantics; new
-  `category` or `severity` values (Node would reject them); changing types or limits downward.
-- Deploy order for v2: Python serves v1+v2 → Node switches to v2 → Python removes v1.
-
----
-
-## 7. Future streaming endpoint (not implemented)
-
-Node's client interface yields an async stream of chunks:
-`{ type: "findings", findings } … { type: "result", findings, model }`. A future
-`POST /internal/v1/content-reviews:stream` (e.g. NDJSON or SSE, one validated finding batch per
-line, terminated by a final summary) can be adopted by adding a new client implementation; the
-review domain does not change. Until then, Python returns the complete result in one response.
-
----
-
-## 8. Security and data handling
-
-- Do not log `content`, prompts, or model outputs at info level; log `X-Request-Id`, timings,
-  token counts and error codes instead.
-- Do not persist content beyond what is needed to serve the request (or the idempotency cache,
-  with a short TTL).
-- The OpenAI API key lives **only** in the Python service. Node.js never has it.
-- Configure OpenAI data-retention settings according to your organization's policy.
+- Node never logs `INTERNAL_SERVICE_TOKEN`, `content`, or issue text (`original`, `improved`,
+  `suggestion`, `prefix`, `suffix`). It logs the correlation id, timings, counts, model, token
+  usage and error codes.
+- Model provider API keys live **only** in the Python service.

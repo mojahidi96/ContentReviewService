@@ -6,24 +6,24 @@ import { HttpPythonLlmClient } from '../../src/integrations/python-llm/http-llm-
 import {
   LlmAbortedError,
   LlmBadResponseError,
+  LlmContentTooLargeError,
   LlmRateLimitedError,
   LlmRejectedError,
   LlmTimeoutError,
   LlmUnavailableError,
 } from '../../src/integrations/python-llm/llm.errors.js';
 import type {
-  AnalysisChunk,
-  AnalysisRequest,
+  ContentReviewRequest,
+  ContentReviewResponse,
 } from '../../src/integrations/python-llm/llm.types.js';
-import { validAnalysisResponse } from '../fixtures/python-responses.js';
+import { validContentReviewResponse } from '../fixtures/python-responses.js';
 
 type Handler = (req: http.IncomingMessage, body: string, res: http.ServerResponse) => void;
 
 const TOKEN = 'service-token-0123456789';
-const request: AnalysisRequest = {
+const request: ContentReviewRequest = {
   requestId: 'req_1',
   content: 'The report have several mistake.',
-  categories: ['grammar', 'spelling'],
   language: 'en',
 };
 
@@ -37,19 +37,15 @@ function json(
   res.end(JSON.stringify(body));
 }
 
-async function collect(
+function review(
   client: HttpPythonLlmClient,
   req = request,
   signal?: AbortSignal,
-): Promise<AnalysisChunk[]> {
-  const chunks: AnalysisChunk[] = [];
-  for await (const c of client.analyze(req, {
+): Promise<ContentReviewResponse> {
+  return client.reviewContent(req, {
     ...(signal ? { signal } : {}),
     correlationId: 'corr-12345678',
-  })) {
-    chunks.push(c);
-  }
-  return chunks;
+  });
 }
 
 describe('HttpPythonLlmClient', () => {
@@ -88,82 +84,111 @@ describe('HttpPythonLlmClient', () => {
     await new Promise((r) => server.close(r));
   });
 
-  it('sends the documented request and returns validated findings', async () => {
+  it('sends the documented request and returns the validated response', async () => {
     handler = (_req, _body, res) =>
-      json(res, 200, { ...validAnalysisResponse('req_1'), extraField: 'ignored' });
-    const chunks = await collect(client);
+      json(res, 200, { ...validContentReviewResponse('req_1'), extraField: 'ignored' });
+    const result = await review(client);
 
-    expect(chunks).toEqual([
-      { type: 'result', model: 'gpt-test', findings: validAnalysisResponse('req_1').findings },
-    ]);
+    expect(result).toEqual(validContentReviewResponse('req_1'));
     const sent = received[0]!;
     expect(sent.url).toBe('/internal/v1/content-reviews');
     expect(sent.headers.authorization).toBe(`Bearer ${TOKEN}`);
-    expect(sent.headers['idempotency-key']).toBe('req_1');
     expect(sent.headers['x-request-id']).toBe('corr-12345678');
     expect(sent.headers['content-type']).toBe('application/json');
+    // Exactly the documented fields: Python answers 422 to anything else (e.g. `categories`).
     expect(JSON.parse(sent.body)).toEqual(request);
   });
 
-  it.each([
-    [401, LlmRejectedError, false],
-    [400, LlmRejectedError, false],
-    [413, LlmRejectedError, false],
-    [500, LlmUnavailableError, true],
-    [502, LlmUnavailableError, true],
-    [503, LlmUnavailableError, true],
-    [504, LlmTimeoutError, true],
-  ])('maps HTTP %i to %o (retryable=%s)', async (status, ErrorClass, retryable) => {
-    handler = (_req, _body, res) =>
-      json(res, status, { error: { code: 'SOMETHING', message: 'x' } });
-    const err = await collect(client).catch((e: unknown) => e);
-    expect(err).toBeInstanceOf(ErrorClass);
-    expect((err as LlmRejectedError).retryable).toBe(retryable);
+  it('omits language when not given so Python applies its default', async () => {
+    handler = (_req, _body, res) => json(res, 200, validContentReviewResponse('req_1'));
+    await review(client, { requestId: 'req_1', content: 'Hi' });
+    expect(JSON.parse(received[0]!.body)).toEqual({ requestId: 'req_1', content: 'Hi' });
   });
 
+  it('accepts a response with no issues and token usage', async () => {
+    handler = (_req, _body, res) =>
+      json(res, 200, {
+        requestId: 'req_1',
+        issues: [],
+        model: 'gemini-test',
+        usage: { inputTokens: 120, outputTokens: 4 },
+      });
+    expect(await review(client)).toEqual({
+      requestId: 'req_1',
+      issues: [],
+      model: 'gemini-test',
+      usage: { inputTokens: 120, outputTokens: 4 },
+    });
+  });
+
+  it.each([
+    [401, 'UNAUTHORIZED', LlmRejectedError, false, undefined],
+    [413, 'CONTENT_TOO_LARGE', LlmContentTooLargeError, false, undefined],
+    [422, 'INVALID_REQUEST', LlmRejectedError, false, undefined],
+    [429, 'LLM_QUOTA_EXHAUSTED', LlmRateLimitedError, true, undefined],
+    [502, 'INVALID_MODEL_OUTPUT', LlmBadResponseError, true, 1],
+    [503, 'LLM_PROVIDER_UNAVAILABLE', LlmUnavailableError, true, 2],
+    [503, 'AI_CONCURRENCY_LIMIT', LlmUnavailableError, true, 2],
+    [502, 'BAD_GATEWAY', LlmUnavailableError, true, undefined],
+    [500, 'INTERNAL', LlmUnavailableError, true, undefined],
+    [504, 'GATEWAY_TIMEOUT', LlmTimeoutError, true, undefined],
+    [400, 'SOMETHING', LlmRejectedError, false, undefined],
+  ])(
+    'maps HTTP %i %s to %o (retryable=%s, maxRetries=%s)',
+    async (status, code, ErrorClass, retryable, maxRetries) => {
+      handler = (_req, _body, res) =>
+        json(res, status, { error: { code, message: 'x', requestId: 'req_1' } });
+      const err = await review(client).catch((e: unknown) => e);
+      expect(err).toBeInstanceOf(ErrorClass);
+      expect(err).toMatchObject({ retryable, maxRetries });
+    },
+  );
+
   it('keeps the upstream error code for rejected requests', async () => {
-    handler = (_req, _body, res) => json(res, 422, { error: { code: 'UNSUPPORTED_LANGUAGE' } });
-    const err = (await collect(client).catch((e: unknown) => e)) as LlmRejectedError;
-    expect(err).toMatchObject({ upstreamStatus: 422, upstreamCode: 'UNSUPPORTED_LANGUAGE' });
+    handler = (_req, _body, res) => json(res, 422, { error: { code: 'INVALID_REQUEST' } });
+    const err = (await review(client).catch((e: unknown) => e)) as LlmRejectedError;
+    expect(err).toMatchObject({ upstreamStatus: 422, upstreamCode: 'INVALID_REQUEST' });
   });
 
   it('maps 429 with Retry-After to a rate-limit error', async () => {
     handler = (_req, _body, res) =>
-      json(res, 429, { error: { code: 'RATE_LIMITED' } }, { 'retry-after': '7' });
-    const err = await collect(client).catch((e: unknown) => e);
+      json(res, 429, { error: { code: 'LLM_QUOTA_EXHAUSTED' } }, { 'retry-after': '7' });
+    const err = await review(client).catch((e: unknown) => e);
     expect(err).toBeInstanceOf(LlmRateLimitedError);
     expect((err as LlmRateLimitedError).retryAfterMs).toBe(7000);
+  });
+
+  it('honors Retry-After on 503', async () => {
+    handler = (_req, _body, res) =>
+      json(res, 503, { error: { code: 'AI_CONCURRENCY_LIMIT' } }, { 'retry-after': '3' });
+    const err = await review(client).catch((e: unknown) => e);
+    expect(err).toMatchObject({ retryAfterMs: 3000, maxRetries: 2 });
   });
 
   it('rejects malformed JSON', async () => {
     handler = (_req, _body, res) => {
       res.writeHead(200, { 'content-type': 'application/json' });
-      res.end('{"findings": [');
+      res.end('{"issues": [');
     };
-    await expect(collect(client)).rejects.toBeInstanceOf(LlmBadResponseError);
+    await expect(review(client)).rejects.toBeInstanceOf(LlmBadResponseError);
   });
 
+  const issue = validContentReviewResponse('req_1').issues[0]!;
   it.each([
-    ['missing findings', { requestId: 'req_1', offsetUnit: 'codepoint' }],
-    ['wrong offset unit', { ...validAnalysisResponse('req_1'), offsetUnit: 'utf16' }],
-    ['mismatched requestId', validAnalysisResponse('other')],
+    ['missing issues', { requestId: 'req_1', model: 'm', usage: {} }],
+    ['mismatched requestId', validContentReviewResponse('other')],
     [
-      'invalid category',
-      {
-        ...validAnalysisResponse('req_1'),
-        findings: [{ ...validAnalysisResponse('req_1').findings[0], category: 'style' }],
-      },
+      'unknown issueType',
+      { ...validContentReviewResponse('req_1'), issues: [{ ...issue, issueType: 'style' }] },
     ],
     [
-      'negative offset',
-      {
-        ...validAnalysisResponse('req_1'),
-        findings: [{ ...validAnalysisResponse('req_1').findings[0], startOffset: -1 }],
-      },
+      'missing location',
+      { ...validContentReviewResponse('req_1'), issues: [{ ...issue, location: undefined }] },
     ],
+    ['old v1 shape', { requestId: 'req_1', offsetUnit: 'codepoint', findings: [] }],
   ])('rejects contract violations: %s', async (_name, body) => {
     handler = (_req, _body, res) => json(res, 200, body);
-    await expect(collect(client)).rejects.toBeInstanceOf(LlmBadResponseError);
+    await expect(review(client)).rejects.toBeInstanceOf(LlmBadResponseError);
   });
 
   it('times out slow responses', async () => {
@@ -171,7 +196,7 @@ describe('HttpPythonLlmClient', () => {
       /* never respond */
     };
     const started = Date.now();
-    await expect(collect(client)).rejects.toBeInstanceOf(LlmTimeoutError);
+    await expect(review(client)).rejects.toBeInstanceOf(LlmTimeoutError);
     expect(Date.now() - started).toBeLessThan(2_000);
   });
 
@@ -181,7 +206,7 @@ describe('HttpPythonLlmClient', () => {
     };
     const controller = new AbortController();
     setTimeout(() => controller.abort(), 50);
-    await expect(collect(client, request, controller.signal)).rejects.toBeInstanceOf(
+    await expect(review(client, request, controller.signal)).rejects.toBeInstanceOf(
       LlmAbortedError,
     );
   });
@@ -194,7 +219,7 @@ describe('HttpPythonLlmClient', () => {
       connectTimeoutMs: 300,
       logger: pino({ level: 'silent' }),
     });
-    const err = await collect(dead).catch((e: unknown) => e);
+    const err = await review(dead).catch((e: unknown) => e);
     expect(err).toBeInstanceOf(LlmUnavailableError);
     expect(await dead.checkHealth()).toMatchObject({ status: 'unavailable' });
     await dead.close();

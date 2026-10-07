@@ -6,7 +6,7 @@ const base = {
   FRONTEND_ORIGIN: 'http://localhost:4200',
   AUTH_JWT_SECRET: 'a'.repeat(40),
   CSRF_SECRET: 'b'.repeat(40),
-  PYTHON_LLM_SERVICE_TOKEN: 'c'.repeat(32),
+  INTERNAL_SERVICE_TOKEN: 'c'.repeat(32),
 };
 
 const prod = {
@@ -65,12 +65,10 @@ describe('environment validation', () => {
   });
 
   it('requires a service token in http mode but not in mock mode', () => {
-    expect(issuesFor({ ...base, PYTHON_LLM_SERVICE_TOKEN: '' }).join()).toMatch(
-      /PYTHON_LLM_SERVICE_TOKEN/,
+    expect(issuesFor({ ...base, INTERNAL_SERVICE_TOKEN: '' }).join()).toMatch(
+      /INTERNAL_SERVICE_TOKEN/,
     );
-    expect(issuesFor({ ...base, PYTHON_LLM_SERVICE_TOKEN: '', PYTHON_LLM_MODE: 'mock' })).toEqual(
-      [],
-    );
+    expect(issuesFor({ ...base, INTERNAL_SERVICE_TOKEN: '', PYTHON_LLM_MODE: 'mock' })).toEqual([]);
   });
 
   it('rejects origins with paths or trailing slashes', () => {

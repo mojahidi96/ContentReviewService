@@ -82,11 +82,11 @@ POST /reviews ──▶ Review(pending) + Job(queued) ──▶ 202
           worker claims job (lease) ─▶ Review(processing, jobAttempt=n)
                                   │      └─ event: review.started, review.progress(analyzing)
                                   ▼
-                     PythonLlmClient.analyze()  ── retryable error ─▶ Job(queued, runAfter=backoff)
+               PythonLlmClient.reviewContent()  ── retryable error ─▶ Job(queued, runAfter=backoff)
                                   │                                    └─ event: review.progress(retrying)
                                   │            ── permanent / exhausted ─▶ Review(failed) ─▶ event: review.failed
                                   ▼
-         validate schema + offsets + categories, dedupe, stable finding ids
+   validate schema, place issues via prefix/suffix → offsets, dedupe, stable finding ids
                                   ▼
          Review(completed, findings)  ──▶ events: finding.detected × N, review.completed
 ```
@@ -103,7 +103,10 @@ atomic single-document updates.
   conditional on `(lockedBy, attempts)`, so a worker that lost its lease cannot change the job.
 - Retryable errors (timeouts, 5xx, 429, malformed output, unexpected errors) are rescheduled
   with exponential backoff + jitter (respecting `Retry-After`) up to `JOB_MAX_ATTEMPTS`.
-  Non-retryable errors (Python 4xx) fail immediately.
+  Some errors cap their own retries below that: invalid model output (502
+  `INVALID_MODEL_OUTPUT`, or a response that breaks the contract) is retried once, and a 503
+  (`LLM_PROVIDER_UNAVAILABLE`, `AI_CONCURRENCY_LIMIT`) at most twice. Non-retryable errors
+  (401, 413, 422 and other 4xx) fail immediately.
 - Graceful shutdown waits `SHUTDOWN_GRACE_MS`, then aborts in-flight calls and releases jobs
   back to the queue without consuming an attempt.
 - Workers run in the API process (`WORKER_ENABLED=true`) or as separate processes

@@ -1,7 +1,12 @@
+import http from 'node:http';
+import type { AddressInfo } from 'node:net';
+import { pino } from 'pino';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { ReviewJobModel } from '../../src/infrastructure/jobs/job.model.js';
+import { HttpPythonLlmClient } from '../../src/integrations/python-llm/http-llm-client.js';
 import {
   LlmBadResponseError,
+  LlmContentTooLargeError,
   LlmRateLimitedError,
   LlmRejectedError,
   LlmUnavailableError,
@@ -18,6 +23,7 @@ import {
   newAgent,
   processUntilSettled,
   registerUser,
+  SAMPLE_CONTENT,
   type Agent,
   type TestApp,
 } from '../helpers/test-app.js';
@@ -59,13 +65,8 @@ describe('review processing', () => {
 
     expect(review.status).toBe('completed');
     expect(review.startedAt).toBeInstanceOf(Date);
-    expect(t.llm.calls).toEqual([
-      expect.objectContaining({
-        requestId: reviewId,
-        language: 'en',
-        categories: ['grammar', 'spelling', 'profanity'],
-      }),
-    ]);
+    // Only the documented fields: no categories (the service reviews every issue type).
+    expect(t.llm.calls).toEqual([{ requestId: reviewId, content: SAMPLE_CONTENT }]);
     expect(await eventTypes(reviewId)).toEqual([
       'review.started',
       'review.progress',
@@ -139,76 +140,69 @@ describe('review processing', () => {
     expect(t.llm.calls).toHaveLength(1);
   });
 
-  it('treats malformed responses as retryable but bounded', async () => {
+  it('retries invalid model output once', async () => {
     t.llm.setHandler(() => {
-      throw new LlmBadResponseError('schema');
+      throw new LlmBadResponseError('INVALID_MODEL_OUTPUT');
     });
     const { reviewId } = await createReview(agent, csrf);
     const review = await processUntilSettled(t.container, reviewId);
     expect(review).toMatchObject({ status: 'failed', errorCode: 'LLM_INVALID_RESPONSE' });
-    expect(t.llm.calls).toHaveLength(3);
+    expect(t.llm.calls).toHaveLength(2);
   });
 
-  it('drops findings with mismatched offsets, unrequested categories and duplicates', async () => {
-    const content = 'Héllo 👋🏽 wrld!';
-    // Code points: H é l l o ␠ 👋 🏽 ␠ w r l d !  → "wrld" is [9, 13)
+  it('fails content that is too large without retrying', async () => {
+    t.llm.setHandler(() => {
+      throw new LlmContentTooLargeError('413');
+    });
+    const { reviewId } = await createReview(agent, csrf);
+    const review = await processUntilSettled(t.container, reviewId);
+    expect(review).toMatchObject({
+      status: 'failed',
+      errorCode: 'LLM_CONTENT_TOO_LARGE',
+      errorMessage: 'The content is too long to review. Shorten it and try again.',
+    });
+    expect(t.llm.calls).toHaveLength(1);
+  });
+
+  it('places issues by their context, keeps every issue type, drops unplaceable ones', async () => {
+    const content = 'Héllo 👋🏽 wrld! wrld?';
+    // Code points: H é l l o ␠ 👋 🏽 ␠ w r l d ! ␠ w r l d ?  → second "wrld" is [15, 19)
+    const wrld = {
+      id: 'issue-1',
+      issueType: 'typo' as const,
+      severity: 'low' as const,
+      original: 'wrld',
+      improved: 'world',
+      suggestion: 'Fix the typo.',
+      location: { prefix: '! ', suffix: '?' },
+    };
     t.llm.setHandler(() => [
       {
-        category: 'spelling',
-        severity: 'low',
-        originalText: 'wrld',
-        suggestedText: 'world',
-        explanation: 'Typo.',
-        startOffset: 9,
-        endOffset: 13,
+        ...wrld,
+        id: 'issue-0',
+        issueType: 'clarity',
+        original: 'Héllo',
+        improved: 'Hello',
+        location: { prefix: '', suffix: ' 👋🏽' },
       },
-      {
-        category: 'spelling',
-        severity: 'low',
-        originalText: 'wrld',
-        suggestedText: 'world',
-        explanation: 'Typo.',
-        startOffset: 9,
-        endOffset: 13,
-      },
-      // UTF-16 offsets (wrong convention) must be rejected.
-      {
-        category: 'spelling',
-        severity: 'low',
-        originalText: 'wrld',
-        suggestedText: 'world',
-        explanation: 'Typo.',
-        startOffset: 11,
-        endOffset: 15,
-      },
-      {
-        category: 'grammar',
-        severity: 'low',
-        originalText: 'Héllo',
-        suggestedText: 'Hello',
-        explanation: 'x',
-        startOffset: 0,
-        endOffset: 5,
-      },
-      {
-        category: 'spelling',
-        severity: 'low',
-        originalText: 'nope',
-        suggestedText: '',
-        explanation: 'x',
-        startOffset: 50,
-        endOffset: 54,
-      },
+      wrld,
+      { ...wrld, id: 'issue-dup' },
+      { ...wrld, id: 'issue-gone', original: 'nope', location: { prefix: '', suffix: '' } },
     ]);
+    // `categories` is informational now; issues of other types are still kept.
     const { reviewId } = await createReview(agent, csrf, { content, categories: ['spelling'] });
     const review = await processUntilSettled(t.container, reviewId);
 
     expect(review.status).toBe('completed');
-    expect(review.findings).toHaveLength(1);
-    expect(review.findings[0]).toMatchObject({
-      originalText: 'wrld',
-      startOffset: 9,
-      endOffset: 13,
+    expect(
+      review.findings.map((f) => [f.category, f.originalText, f.startOffset, f.endOffset]),
+    ).toEqual([
+      ['clarity', 'Héllo', 0, 5],
+      ['typo', 'wrld', 15, 19],
+    ]);
+    expect(review.findings[1]).toMatchObject({
+      suggestedText: 'world',
+      explanation: 'Fix the typo.',
     });
   });
 
@@ -368,5 +362,163 @@ describe('review processing', () => {
     await t.container.worker.drain();
     expect(await ReviewModel.countDocuments({ _id: reviewId })).toBe(0);
     expect(await ReviewEventModel.countDocuments({ reviewId })).toBe(0);
+  });
+
+  describe('per-error retry limits', () => {
+    let roomy: TestApp;
+    let roomyAgent: Agent;
+    let roomyCsrf: string;
+    beforeAll(() => {
+      // A larger job budget so the error-specific limits are what stop the retries.
+      roomy = createTestApp({ env: { JOB_MAX_ATTEMPTS: '6' } });
+    });
+    beforeEach(async () => {
+      roomy.llm.calls = [];
+      // Reviews must be created through this app so their jobs get its attempt budget.
+      roomyAgent = newAgent(roomy.app);
+      roomyCsrf = (await registerUser(roomyAgent)).csrfToken;
+    });
+
+    it.each([
+      ['503 retries at most twice', () => new LlmUnavailableError('503', { maxRetries: 2 }), 3],
+      ['invalid model output retries once', () => new LlmBadResponseError('502'), 2],
+      ['transport failures use the full job budget', () => new LlmUnavailableError('down'), 6],
+      ['quota exhaustion uses the full job budget', () => new LlmRateLimitedError('429'), 6],
+    ])('%s', async (_name, makeError, expectedCalls) => {
+      roomy.llm.setHandler(() => {
+        throw makeError();
+      });
+      const { reviewId } = await createReview(roomyAgent, roomyCsrf);
+      const review = await processUntilSettled(roomy.container, reviewId);
+      expect(review.status).toBe('failed');
+      expect(roomy.llm.calls).toHaveLength(expectedCalls);
+    });
+  });
+
+  describe('against the Python HTTP API', () => {
+    let server: http.Server;
+    let httpApp: TestApp;
+    let llm: HttpPythonLlmClient;
+    let respond: (body: { requestId: string; content: string }, call: number) => [number, unknown];
+    let bodies: string[] = [];
+
+    beforeAll(async () => {
+      server = http.createServer((req, res) => {
+        let body = '';
+        req.on('data', (c: Buffer) => (body += c.toString()));
+        req.on('end', () => {
+          bodies.push(body);
+          const [status, payload] = respond(JSON.parse(body), bodies.length);
+          res.writeHead(status, { 'content-type': 'application/json' });
+          res.end(JSON.stringify(payload));
+        });
+      });
+      await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
+      llm = new HttpPythonLlmClient({
+        baseUrl: `http://127.0.0.1:${(server.address() as AddressInfo).port}`,
+        serviceToken: 'service-token-0123456789',
+        timeoutMs: 2_000,
+        connectTimeoutMs: 500,
+        logger: pino({ level: 'silent' }),
+      });
+      httpApp = createTestApp({ llmClient: llm });
+    });
+    beforeEach(() => {
+      bodies = [];
+    });
+    afterAll(async () => {
+      await llm.close();
+      server.closeAllConnections();
+      await new Promise((r) => server.close(r));
+    });
+
+    it('turns Python issues into findings the UI can highlight', async () => {
+      respond = (body) => [
+        200,
+        {
+          requestId: body.requestId,
+          issues: [
+            {
+              id: 'issue-3f9a1c2b7d10',
+              issueType: 'spelling',
+              severity: 'low',
+              original: 'recieve',
+              improved: 'receive',
+              suggestion: 'Correct the spelling mistake.',
+              location: { prefix: 'Please ', suffix: ' teh files' },
+            },
+          ],
+          model: 'gemini-test',
+          usage: { inputTokens: 10, outputTokens: 5 },
+        },
+      ];
+      const { reviewId } = await createReview(agent, csrf);
+      const review = await processUntilSettled(httpApp.container, reviewId);
+
+      expect(JSON.parse(bodies[0]!)).toEqual({ requestId: reviewId, content: SAMPLE_CONTENT });
+      expect(review.status).toBe('completed');
+      const start = SAMPLE_CONTENT.indexOf('recieve');
+      expect(review.findings).toEqual([
+        expect.objectContaining({
+          category: 'spelling',
+          originalText: 'recieve',
+          suggestedText: 'receive',
+          explanation: 'Correct the spelling mistake.',
+          startOffset: start,
+          endOffset: start + 'recieve'.length,
+        }),
+      ]);
+    });
+
+    it('completes with no findings when there are no issues', async () => {
+      respond = (body) => [
+        200,
+        {
+          requestId: body.requestId,
+          issues: [],
+          model: 'm',
+          usage: { inputTokens: null, outputTokens: null },
+        },
+      ];
+      const { reviewId } = await createReview(agent, csrf);
+      const review = await processUntilSettled(httpApp.container, reviewId);
+      expect(review).toMatchObject({ status: 'completed', findingCount: 0, findings: [] });
+    });
+
+    it('retries a 503 and succeeds', async () => {
+      respond = (body, call) =>
+        call === 1
+          ? [
+              503,
+              {
+                error: { code: 'AI_CONCURRENCY_LIMIT', message: 'busy', requestId: body.requestId },
+              },
+            ]
+          : [
+              200,
+              {
+                requestId: body.requestId,
+                issues: [],
+                model: 'm',
+                usage: { inputTokens: null, outputTokens: null },
+              },
+            ];
+      const { reviewId } = await createReview(agent, csrf);
+      const review = await processUntilSettled(httpApp.container, reviewId);
+      expect(review.status).toBe('completed');
+      expect(bodies).toHaveLength(2);
+    });
+
+    it.each([
+      [401, 'UNAUTHORIZED', 'LLM_REQUEST_REJECTED'],
+      [422, 'INVALID_REQUEST', 'LLM_REQUEST_REJECTED'],
+      [413, 'CONTENT_TOO_LARGE', 'LLM_CONTENT_TOO_LARGE'],
+    ])('fails without retrying on %i %s', async (status, code, errorCode) => {
+      respond = (body) => [status, { error: { code, message: 'x', requestId: body.requestId } }];
+      const { reviewId } = await createReview(agent, csrf);
+      const review = await processUntilSettled(httpApp.container, reviewId);
+      expect(review).toMatchObject({ status: 'failed', errorCode });
+      expect(bodies).toHaveLength(1);
+    });
   });
 });

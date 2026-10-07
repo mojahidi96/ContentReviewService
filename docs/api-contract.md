@@ -135,6 +135,7 @@ Review **processing** failures are not HTTP errors; they appear as `status: "fai
 | `LLM_SERVICE_RATE_LIMITED` | Analysis service busy after retries               |
 | `LLM_INVALID_RESPONSE`     | Analysis service returned invalid results         |
 | `LLM_REQUEST_REJECTED`     | Content could not be reviewed (not retried)       |
+| `LLM_CONTENT_TOO_LARGE`    | Content too long for the analysis service         |
 | `PROCESSING_TIMEOUT`       | Processing did not finish (e.g. repeated crashes) |
 | `PROCESSING_FAILED`        | Unexpected processing failure                     |
 
@@ -187,7 +188,7 @@ another user's review is reported as `404 REVIEW_NOT_FOUND`.
 {
   "documentTitle": "Quarterly Business Report",
   "content": "The report have several mistake.",
-  "categories": ["grammar", "spelling", "profanity"]
+  "categories": ["grammar", "spelling"]
 }
 ```
 
@@ -195,7 +196,7 @@ another user's review is reported as `404 REVIEW_NOT_FOUND`.
 | --------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `documentTitle` | 1–200 chars after trimming                                                                                                                                                  |
 | `content`       | not blank; ≤ `REVIEW_MAX_CONTENT_CHARS` **code points** (default 50 000); well-formed Unicode. Stored **exactly as sent** (no trimming/normalization) so offsets stay valid |
-| `categories`    | non-empty, unique subset of `grammar`, `spelling`, `profanity`                                                                                                              |
+| `categories`    | **optional**, informational: non-empty, unique list of `Category` values. Stored and echoed back, but every issue type is always checked                                    |
 
 Response `202 Accepted` (returns immediately; analysis runs in the background), header
 `Location: /api/v1/reviews/{reviewId}`:
@@ -444,13 +445,23 @@ interface User {
 
 ```ts
 type ReviewStatus = 'pending' | 'processing' | 'completed' | 'failed' | 'cancelled';
-type Category = 'grammar' | 'spelling' | 'profanity';
+type Category =
+  | 'spelling'
+  | 'grammar'
+  | 'typo'
+  | 'punctuation'
+  | 'clarity'
+  | 'slang'
+  | 'vulgarity'
+  | 'deprecated_term'
+  | 'inappropriate_language'
+  | 'profanity'; // only on reviews created before the AI service v2; new findings never use it
 
 interface ReviewSummary {
   reviewId: string;
   documentTitle: string;
   status: ReviewStatus;
-  categories: Category[];
+  categories: Category[]; // [] when the client sent none
   findingCount: number; // 0 until completed
   errorCode: string | null; // set when status === 'failed'
   errorMessage: string | null; // user-safe
@@ -479,8 +490,8 @@ interface Finding {
   category: Category;
   severity: 'low' | 'medium' | 'high';
   originalText: string;
-  suggestedText: string; // may be '' (e.g. remove profanity)
-  explanation: string;
+  suggestedText: string; // improved text; may be '' (e.g. remove a vulgarity)
+  explanation: string; // what to change and why
   startOffset: number; // code points, inclusive
   endOffset: number; // code points, exclusive
   status: 'pending' | 'accepted' | 'dismissed' | 'resolved';
