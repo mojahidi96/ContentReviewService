@@ -1,6 +1,6 @@
 # Local development stack: MongoDB + the API (with the in-process worker).
 # The Python LLM service lives in a separate repository. By default the API uses the built-in
-# mock client; to use the real service set PYTHON_LLM_MODE=http and PYTHON_LLM_SERVICE_URL
+# mock client; to use the real service set PYTHON_LLM_MODE=http and AI_SERVICE_BASE_URL
 # (e.g. http://host.docker.internal:8000) in your shell or an .env file next to this file.
 name: content-review
 
@@ -41,8 +41,8 @@ services:
       CSRF_SECRET: ${CSRF_SECRET:-dev-only-csrf-secret-change-me-0123456789abcdef}
       AUTH_COOKIE_SECURE: 'false'
       PYTHON_LLM_MODE: ${PYTHON_LLM_MODE:-mock}
-      PYTHON_LLM_SERVICE_URL: ${PYTHON_LLM_SERVICE_URL:-http://host.docker.internal:8000}
-      PYTHON_LLM_SERVICE_TOKEN: ${PYTHON_LLM_SERVICE_TOKEN:-}
+      AI_SERVICE_BASE_URL: ${AI_SERVICE_BASE_URL:-http://host.docker.internal:8000}
+      INTERNAL_SERVICE_TOKEN: ${INTERNAL_SERVICE_TOKEN:-}
     extra_hosts:
       - 'host.docker.internal:host-gateway'
 
@@ -66,8 +66,8 @@ services:
       AUTH_JWT_SECRET: ${AUTH_JWT_SECRET:-dev-only-jwt-secret-change-me-0123456789abcdef}
       CSRF_SECRET: ${CSRF_SECRET:-dev-only-csrf-secret-change-me-0123456789abcdef}
       PYTHON_LLM_MODE: ${PYTHON_LLM_MODE:-mock}
-      PYTHON_LLM_SERVICE_URL: ${PYTHON_LLM_SERVICE_URL:-http://host.docker.internal:8000}
-      PYTHON_LLM_SERVICE_TOKEN: ${PYTHON_LLM_SERVICE_TOKEN:-}
+      AI_SERVICE_BASE_URL: ${AI_SERVICE_BASE_URL:-http://host.docker.internal:8000}
+      INTERNAL_SERVICE_TOKEN: ${INTERNAL_SERVICE_TOKEN:-}
     extra_hosts:
       - 'host.docker.internal:host-gateway'
 

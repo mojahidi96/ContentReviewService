@@ -1,11 +1,19 @@
 import { sha256Hex } from '../../shared/utils/hash.js';
-import type { LlmFinding } from '../../integrations/python-llm/llm.types.js';
+import type { FindingCategory } from '../../integrations/python-llm/llm.types.js';
 
 /**
  * Deterministic finding id: the same finding produced by a retried job gets the same id,
  * so retries and duplicate deliveries cannot create duplicates.
  */
-export function computeFindingId(reviewId: string, finding: LlmFinding): string {
+export function computeFindingId(
+  reviewId: string,
+  finding: {
+    category: FindingCategory;
+    startOffset: number;
+    endOffset: number;
+    originalText: string;
+  },
+): string {
   const key = [
     reviewId,
     finding.category,

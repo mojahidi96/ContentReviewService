@@ -1,40 +1,61 @@
-export const FINDING_CATEGORIES = ['grammar', 'spelling', 'profanity'] as const;
+/** Issue types produced by the Python service (contract v2). */
+export const ISSUE_TYPES = [
+  'spelling',
+  'grammar',
+  'typo',
+  'punctuation',
+  'clarity',
+  'slang',
+  'vulgarity',
+  'deprecated_term',
+  'inappropriate_language',
+] as const;
+export type IssueType = (typeof ISSUE_TYPES)[number];
+
+/**
+ * Categories a stored finding (or a review's requested categories) may carry: every current
+ * issue type plus `profanity`, which only appears on reviews created before contract v2.
+ */
+export const FINDING_CATEGORIES = [...ISSUE_TYPES, 'profanity'] as const;
 export type FindingCategory = (typeof FINDING_CATEGORIES)[number];
 
 export const FINDING_SEVERITIES = ['low', 'medium', 'high'] as const;
 export type FindingSeverity = (typeof FINDING_SEVERITIES)[number];
 
-export interface AnalysisRequest {
-  /** Stable per review; Python must treat repeated calls with the same id idempotently. */
+/** Body of POST /internal/v1/content-reviews. Python rejects any other field with 422. */
+export interface ContentReviewRequest {
+  /** Stable per review (1-128 chars). */
   requestId: string;
   content: string;
-  categories: FindingCategory[];
-  language: string;
-}
-
-/** A finding as returned by the Python service (offsets in Unicode code points, [start, end)). */
-export interface LlmFinding {
-  category: FindingCategory;
-  severity: FindingSeverity;
-  originalText: string;
-  suggestedText: string;
-  explanation: string;
-  startOffset: number;
-  endOffset: number;
+  /** Defaults to "en" on the Python side. */
+  language?: string;
 }
 
 /**
- * Units produced by a client. Today the HTTP client yields a single `result` chunk; a future
- * streaming client can yield `findings` batches followed by `result` without changing the
- * review domain, which consumes chunks generically.
+ * An issue as returned by the Python service. There are no offsets: the issue is placed by
+ * finding `original` in the content where it is preceded by `prefix` and followed by `suffix`.
  */
-export type AnalysisChunk =
-  | { type: 'findings'; findings: LlmFinding[] }
-  | { type: 'result'; findings: LlmFinding[]; model?: string | undefined };
+export interface ContentReviewIssue {
+  id: string;
+  issueType: IssueType;
+  severity: FindingSeverity;
+  original: string;
+  improved: string;
+  suggestion: string;
+  location: { prefix: string; suffix: string };
+}
 
-export interface AnalyzeOptions {
+export interface ContentReviewResponse {
+  requestId: string;
+  /** In document order. */
+  issues: ContentReviewIssue[];
+  model: string;
+  usage: { inputTokens: number | null; outputTokens: number | null };
+}
+
+export interface ReviewContentOptions {
   signal?: AbortSignal;
-  /** Correlation id propagated to the Python service as X-Request-Id. */
+  /** Correlation id propagated to the Python service as X-Request-ID. */
   correlationId?: string;
 }
 

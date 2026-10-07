@@ -70,7 +70,7 @@ export class ReviewService {
       content: input.content,
       contentHash: sha256Hex(input.content),
       contentLength: codePointLength(input.content),
-      categories: input.categories,
+      categories: input.categories ?? [],
       status: 'pending',
       expiresAt: retentionDays > 0 ? new Date(Date.now() + retentionDays * 86_400_000) : null,
     });

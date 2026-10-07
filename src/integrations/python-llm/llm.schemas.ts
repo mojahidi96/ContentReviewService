@@ -1,35 +1,46 @@
 import { z } from 'zod';
-import { FINDING_CATEGORIES, FINDING_SEVERITIES } from './llm.types.js';
+import { FINDING_SEVERITIES, ISSUE_TYPES } from './llm.types.js';
 
 /** Upper bounds that protect storage and the UI from runaway model output. */
 export const LLM_LIMITS = {
-  maxFindings: 1000,
-  maxOriginalText: 10_000,
-  maxSuggestedText: 10_000,
-  maxExplanation: 2_000,
+  maxIssues: 1000,
+  maxIssueId: 200,
+  maxOriginal: 10_000,
+  maxImproved: 10_000,
+  maxSuggestion: 2_000,
+  maxContext: 2_000,
 } as const;
+
+/** Largest `content` the Python service accepts (characters). */
+export const PYTHON_MAX_CONTENT_CHARS = 100_000;
 
 const wellFormed = (s: string) => s.isWellFormed();
 
-export const llmFindingSchema = z.object({
-  category: z.enum(FINDING_CATEGORIES),
+export const contentReviewIssueSchema = z.object({
+  id: z.string().min(1).max(LLM_LIMITS.maxIssueId),
+  issueType: z.enum(ISSUE_TYPES),
   severity: z.enum(FINDING_SEVERITIES),
-  originalText: z.string().min(1).max(LLM_LIMITS.maxOriginalText).refine(wellFormed),
-  suggestedText: z.string().max(LLM_LIMITS.maxSuggestedText).refine(wellFormed),
-  explanation: z.string().min(1).max(LLM_LIMITS.maxExplanation).refine(wellFormed),
-  startOffset: z.number().int().nonnegative(),
-  endOffset: z.number().int().positive(),
+  original: z.string().min(1).max(LLM_LIMITS.maxOriginal).refine(wellFormed),
+  improved: z.string().max(LLM_LIMITS.maxImproved).refine(wellFormed),
+  suggestion: z.string().min(1).max(LLM_LIMITS.maxSuggestion).refine(wellFormed),
+  location: z.object({
+    // Either may be empty at the start or end of the content.
+    prefix: z.string().max(LLM_LIMITS.maxContext).refine(wellFormed),
+    suffix: z.string().max(LLM_LIMITS.maxContext).refine(wellFormed),
+  }),
 });
 
+const tokenCount = z.number().int().nonnegative().nullable();
+
 /**
- * Response of POST /internal/v1/content-reviews (contract v1).
+ * Response of POST /internal/v1/content-reviews (contract v2).
  * Unknown fields are ignored (stripped) for forward compatibility; known fields are strict.
  */
-export const analysisResponseSchema = z.object({
+export const contentReviewResponseSchema = z.object({
   requestId: z.string().min(1),
-  offsetUnit: z.literal('codepoint'),
-  model: z.string().max(200).optional(),
-  findings: z.array(llmFindingSchema).max(LLM_LIMITS.maxFindings),
+  issues: z.array(contentReviewIssueSchema).max(LLM_LIMITS.maxIssues),
+  model: z.string().max(200),
+  usage: z.object({ inputTokens: tokenCount, outputTokens: tokenCount }),
 });
 
 export const pythonErrorBodySchema = z.object({
@@ -38,5 +49,3 @@ export const pythonErrorBodySchema = z.object({
     message: z.string().max(1000).optional(),
   }),
 });
-
-export type AnalysisResponse = z.infer<typeof analysisResponseSchema>;

@@ -22,11 +22,14 @@ export function createReviewBodySchema(maxContentChars: number) {
         (s) => codePointLength(s) <= maxContentChars,
         `Content must be at most ${maxContentChars} characters`,
       ),
+    // Optional and informational: the AI service always checks every issue type. Kept so
+    // existing clients that still send it continue to work.
     categories: z
       .array(z.enum(FINDING_CATEGORIES))
       .min(1, 'At least one category is required')
       .max(FINDING_CATEGORIES.length)
-      .refine((c) => new Set(c).size === c.length, 'Categories must be unique'),
+      .refine((c) => new Set(c).size === c.length, 'Categories must be unique')
+      .optional(),
   });
 }
 

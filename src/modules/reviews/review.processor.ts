@@ -3,16 +3,12 @@ import type { JobQueue } from '../../infrastructure/jobs/job-queue.js';
 import type { ReviewJobRecord } from '../../infrastructure/jobs/job.model.js';
 import type { MetricsRecorder } from '../../infrastructure/metrics/metrics.js';
 import type { PythonLlmClient } from '../../integrations/python-llm/llm-client.js';
-import {
-  isRetryableError,
-  LlmBadResponseError,
-  LlmError,
-} from '../../integrations/python-llm/llm.errors.js';
-import type { LlmFinding } from '../../integrations/python-llm/llm.types.js';
+import { LlmError, shouldRetry } from '../../integrations/python-llm/llm.errors.js';
+import type { ContentReviewResponse } from '../../integrations/python-llm/llm.types.js';
 import { ErrorCode } from '../../shared/errors/error-codes.js';
 import { computeBackoffMs } from '../../shared/utils/backoff.js';
 import type { ReviewEventStore } from './review-event-store.js';
-import { sanitizeFindings } from './review-findings.js';
+import { resolveIssues } from './review-findings.js';
 import { isTerminalReviewStatus, reviewSourcesFor } from './review-state.js';
 import { toFindingDto } from './review.dto.js';
 import { ReviewModel, type FindingRecord, type ReviewRecord } from './review.model.js';
@@ -94,18 +90,21 @@ export class ReviewProcessor {
     await this.progress(reviewId, 'analyzing', attempt);
 
     try {
-      const llmFindings = await this.analyze(review, signal);
+      const result = await this.analyze(review, signal);
       await this.progress(reviewId, 'validating', attempt);
       const now = new Date();
-      const { findings, rejected, duplicates } = sanitizeFindings(
+      const { findings, notFound, approximate, duplicates } = resolveIssues(
         reviewId,
         review.content,
-        review.categories,
-        llmFindings,
+        result.issues,
         now,
       );
-      if (Object.keys(rejected).length > 0 || duplicates > 0) {
-        log.warn({ rejected, duplicates, accepted: findings.length }, 'Dropped invalid findings');
+      // Counts only: never log content or issue text.
+      if (notFound > 0 || approximate > 0 || duplicates > 0) {
+        log.warn(
+          { notFound, approximate, duplicates, accepted: findings.length },
+          'Some issues could not be placed exactly',
+        );
       }
 
       await this.progress(reviewId, 'persisting', attempt);
@@ -129,7 +128,10 @@ export class ReviewProcessor {
 
       await this.publishCompletion(reviewId, findings, now);
       await jobQueue.complete(job, workerId);
-      log.info({ findingCount: findings.length }, 'Review completed');
+      log.info(
+        { findingCount: findings.length, model: result.model, usage: result.usage },
+        'Review completed',
+      );
       return 'completed';
     } catch (err) {
       if (signal.aborted) {
@@ -169,7 +171,7 @@ export class ReviewProcessor {
     const attempt = job.attempts;
     const errorCode = err instanceof LlmError ? err.code : ErrorCode.PROCESSING_FAILED;
 
-    if (isRetryableError(err) && attempt < job.maxAttempts) {
+    if (shouldRetry(err, attempt, job.maxAttempts)) {
       const backoff = computeBackoffMs(attempt, this.deps.backoff);
       const retryAfter = err instanceof LlmError ? (err.retryAfterMs ?? 0) : 0;
       const delayMs = Math.max(backoff, retryAfter);
@@ -186,34 +188,23 @@ export class ReviewProcessor {
     return 'failed';
   }
 
-  private async analyze(review: ReviewRecord, signal: AbortSignal): Promise<LlmFinding[]> {
+  private async analyze(review: ReviewRecord, signal: AbortSignal): Promise<ContentReviewResponse> {
     const started = performance.now();
     const reviewId = review._id.toString();
     try {
-      const collected: LlmFinding[] = [];
-      let sawResult = false;
-      const stream = this.deps.llmClient.analyze(
+      const result = await this.deps.llmClient.reviewContent(
         {
           requestId: reviewId,
           content: review.content,
-          categories: review.categories,
-          language: this.deps.language ?? 'en',
+          ...(this.deps.language ? { language: this.deps.language } : {}),
         },
         { signal, correlationId: reviewId },
       );
-      for await (const chunk of stream) {
-        collected.push(...chunk.findings);
-        if (chunk.type === 'result') {
-          sawResult = true;
-          break;
-        }
-      }
-      if (!sawResult) throw new LlmBadResponseError('Analysis ended without a final result');
       this.deps.metrics.observeLlmCall({
         outcome: 'success',
         durationMs: performance.now() - started,
       });
-      return collected;
+      return result;
     } catch (err) {
       this.deps.metrics.observeLlmCall({
         outcome: 'error',

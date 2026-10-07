@@ -23,7 +23,8 @@ const reviewSchema = new Schema(
     content: { type: String, required: true },
     contentHash: { type: String, required: true },
     contentLength: { type: Number, required: true, min: 1 },
-    categories: { type: [{ type: String, enum: FINDING_CATEGORIES }], required: true },
+    /** Categories the client asked for. Informational only: the AI service reviews every type. */
+    categories: { type: [{ type: String, enum: FINDING_CATEGORIES }], default: [] },
     status: { type: String, enum: REVIEW_STATUSES, default: 'pending', required: true },
     findings: { type: [findingSchema], default: [] },
     findingCount: { type: Number, default: 0 },

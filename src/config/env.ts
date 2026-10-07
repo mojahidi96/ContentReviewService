@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { PYTHON_MAX_CONTENT_CHARS } from '../integrations/python-llm/llm.schemas.js';
 
 const PLACEHOLDER_PATTERN = /replace_with|change[-_]?me|dev[-_]only/i;
 
@@ -90,8 +91,8 @@ const envSchema = z
       .default('content_review_csrf'),
 
     PYTHON_LLM_MODE: z.enum(['http', 'mock']).default('http'),
-    PYTHON_LLM_SERVICE_URL: z.url({ protocol: /^https?$/ }).default('http://localhost:8000'),
-    PYTHON_LLM_SERVICE_TOKEN: z.string().default(''),
+    AI_SERVICE_BASE_URL: z.url({ protocol: /^https?$/ }).default('http://localhost:8000'),
+    INTERNAL_SERVICE_TOKEN: z.string().default(''),
     PYTHON_LLM_TIMEOUT_MS: int(1000, 600_000).default(60_000),
     PYTHON_LLM_CONNECT_TIMEOUT_MS: int(100, 60_000).default(5_000),
     PYTHON_LLM_HEALTH_CHECK: bool.default(true),
@@ -129,12 +130,18 @@ const envSchema = z
         message: 'SameSite=None requires AUTH_COOKIE_SECURE=true',
       });
     }
-    if (env.PYTHON_LLM_MODE === 'http' && env.PYTHON_LLM_SERVICE_TOKEN.length < 16) {
+    if (env.PYTHON_LLM_MODE === 'http' && env.INTERNAL_SERVICE_TOKEN.length < 16) {
       ctx.addIssue({
         code: 'custom',
-        path: ['PYTHON_LLM_SERVICE_TOKEN'],
-        message:
-          'PYTHON_LLM_SERVICE_TOKEN must be at least 16 characters when PYTHON_LLM_MODE=http',
+        path: ['INTERNAL_SERVICE_TOKEN'],
+        message: 'INTERNAL_SERVICE_TOKEN must be at least 16 characters when PYTHON_LLM_MODE=http',
+      });
+    }
+    if (env.REVIEW_MAX_CONTENT_CHARS > PYTHON_MAX_CONTENT_CHARS) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['REVIEW_MAX_CONTENT_CHARS'],
+        message: `REVIEW_MAX_CONTENT_CHARS must be <= ${PYTHON_MAX_CONTENT_CHARS} (the AI service limit)`,
       });
     }
     if (env.METRICS_ENABLED && env.METRICS_PORT === env.PORT) {
@@ -154,7 +161,7 @@ const envSchema = z
     if (env.NODE_ENV !== 'production') return;
 
     // Production hardening: fail fast instead of running with development defaults.
-    const secrets = ['AUTH_JWT_SECRET', 'CSRF_SECRET', 'PYTHON_LLM_SERVICE_TOKEN'] as const;
+    const secrets = ['AUTH_JWT_SECRET', 'CSRF_SECRET', 'INTERNAL_SERVICE_TOKEN'] as const;
     for (const key of secrets) {
       if (PLACEHOLDER_PATTERN.test(env[key])) {
         ctx.addIssue({

@@ -136,7 +136,7 @@ describe('observability configuration', () => {
       FRONTEND_ORIGIN: 'https://app.example.com',
       AUTH_COOKIE_SECURE: 'true',
       PYTHON_LLM_MODE: 'http',
-      PYTHON_LLM_SERVICE_TOKEN: 'c'.repeat(32),
+      INTERNAL_SERVICE_TOKEN: 'c'.repeat(32),
     };
     expect(() => loadEnv({ ...prod, LOG_FORMAT: 'pretty' })).toThrow(/LOG_FORMAT/);
     expect(() => loadEnv({ ...baseEnv, PORT: '9464' })).toThrow(/METRICS_PORT/);

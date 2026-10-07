@@ -42,8 +42,8 @@ export interface Container {
 export function createLlmClient(env: Env, logger: Logger): PythonLlmClient {
   if (env.PYTHON_LLM_MODE === 'mock') return new MockPythonLlmClient({ delayMs: 300 });
   return new HttpPythonLlmClient({
-    baseUrl: env.PYTHON_LLM_SERVICE_URL,
-    serviceToken: env.PYTHON_LLM_SERVICE_TOKEN,
+    baseUrl: env.AI_SERVICE_BASE_URL,
+    serviceToken: env.INTERNAL_SERVICE_TOKEN,
     timeoutMs: env.PYTHON_LLM_TIMEOUT_MS,
     connectTimeoutMs: env.PYTHON_LLM_CONNECT_TIMEOUT_MS,
     logger: logger.child({ component: 'python-llm-client' }),

@@ -7,6 +7,7 @@ import {
   validateOffsets,
 } from '../../src/shared/utils/offsets.js';
 import { analyzeWithRules } from '../../src/integrations/python-llm/mock-llm-client.js';
+import { locateIssue } from '../../src/modules/reviews/issue-locator.js';
 
 /**
  * Reference values match Python 3: len(s) and s[start:end] on the same strings.
@@ -62,17 +63,15 @@ describe('code-point offsets', () => {
     });
   });
 
-  it('mock analysis emits code-point offsets after astral characters', () => {
+  it('mock analysis emits anchors that place after astral characters', () => {
     const content = '🎉🎉 Please recieve teh files';
-    const findings = analyzeWithRules(content, ['spelling']);
-    expect(findings).toHaveLength(2);
-    for (const f of findings) {
-      expect(
-        validateOffsets(toCodePoints(content), f.startOffset, f.endOffset, f.originalText),
-      ).toEqual({
-        valid: true,
-      });
-    }
-    expect(findings[0]).toMatchObject({ originalText: 'recieve', startOffset: 10, endOffset: 17 });
+    const issues = analyzeWithRules(content);
+    expect(issues.map((i) => i.original)).toEqual(['recieve', 'teh']);
+    expect(issues[0]).toMatchObject({
+      improved: 'receive',
+      location: { prefix: '🎉🎉 Please ', suffix: ' teh files' },
+    });
+    const located = locateIssue(content, { original: 'recieve', ...issues[0]!.location });
+    expect(located).toMatchObject({ found: true, startOffset: 10, endOffset: 17 });
   });
 });
