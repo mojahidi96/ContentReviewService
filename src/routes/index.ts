@@ -3,6 +3,7 @@ import type { Container } from '../container.js';
 import type { CsrfProtection } from '../middleware/csrf.js';
 import { createRateLimiter } from '../middleware/rate-limit.js';
 import { createAuthRouter } from '../modules/auth/auth.routes.js';
+import { createDocumentRouter } from '../modules/documents/document.routes.js';
 import { createHealthRouter } from '../modules/health/health.routes.js';
 import { createReviewEventsHandler } from '../modules/reviews/review-sse.controller.js';
 import { createReviewRouter } from '../modules/reviews/review.routes.js';
@@ -37,6 +38,15 @@ export function createApiRouter(c: Container, csrf: CsrfProtection): Router {
         registry: c.sseRegistry,
         metrics: c.metrics,
       }),
+    }),
+  );
+
+  router.use(
+    '/documents',
+    createDocumentRouter({
+      documentService: c.documentService,
+      csrfProtect: csrf.protect,
+      maxContentChars: c.env.DOCUMENT_MAX_CONTENT_CHARS,
     }),
   );
 

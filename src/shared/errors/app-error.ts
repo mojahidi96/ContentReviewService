@@ -50,6 +50,14 @@ export const Errors = {
   reviewNotFound: () => new AppError(ErrorCode.REVIEW_NOT_FOUND, 404, 'The review was not found.'),
   findingNotFound: () =>
     new AppError(ErrorCode.FINDING_NOT_FOUND, 404, 'The finding was not found.'),
+  documentNotFound: () =>
+    new AppError(ErrorCode.DOCUMENT_NOT_FOUND, 404, 'The document was not found.'),
+  documentVersionConflict: () =>
+    new AppError(
+      ErrorCode.DOCUMENT_VERSION_CONFLICT,
+      409,
+      'The document was changed since you loaded it. Reload it before saving again.',
+    ),
   reviewNotCompleted: () =>
     new AppError(
       ErrorCode.REVIEW_NOT_COMPLETED,

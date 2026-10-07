@@ -16,6 +16,7 @@ Anything not documented here is an implementation detail and may change.
 2. [Errors](#2-errors)
 3. [Auth endpoints](#3-auth-endpoints)
 4. [Review endpoints](#4-review-endpoints)
+   - [Document endpoints](#document-endpoints)
 5. [Server-Sent Events](#5-server-sent-events)
 6. [Text offsets](#6-text-offsets)
 7. [Schemas](#7-schemas)
@@ -102,25 +103,27 @@ All errors use one envelope:
 `details` is present only for `VALIDATION_FAILED`. `message` is safe to display but clients
 should branch on `code`.
 
-| HTTP | `code`                     | Meaning                                                       |
-| ---- | -------------------------- | ------------------------------------------------------------- |
-| 400  | `VALIDATION_FAILED`        | Body/params/query failed validation (see `details[].path`)    |
-| 400  | `MALFORMED_JSON`           | Body is not valid JSON                                        |
-| 401  | `AUTH_REQUIRED`            | No valid session (missing, expired, revoked)                  |
-| 401  | `INVALID_CREDENTIALS`      | Login failed (same response for unknown email/wrong password) |
-| 403  | `CSRF_INVALID`             | Missing/invalid `X-CSRF-Token`                                |
-| 403  | `ORIGIN_NOT_ALLOWED`       | Request origin not in the allowlist                           |
-| 404  | `NOT_FOUND`                | Unknown route                                                 |
-| 404  | `REVIEW_NOT_FOUND`         | Review does not exist **or belongs to another user**          |
-| 404  | `FINDING_NOT_FOUND`        | Finding id not in this review                                 |
-| 409  | `EMAIL_ALREADY_REGISTERED` | Registration with an existing email                           |
-| 409  | `REVIEW_NOT_COMPLETED`     | Finding update before the review completed                    |
-| 409  | `INVALID_STATE_TRANSITION` | Finding status change not allowed                             |
-| 409  | `CONFLICT`                 | Concurrent modification; reload and retry                     |
-| 413  | `PAYLOAD_TOO_LARGE`        | Body exceeds `BODY_LIMIT`                                     |
-| 415  | `UNSUPPORTED_MEDIA_TYPE`   | Unsupported request encoding                                  |
-| 429  | `RATE_LIMITED`             | Too many requests; honor `RateLimit`/`Retry-After` headers    |
-| 500  | `INTERNAL_ERROR`           | Unexpected server error                                       |
+| HTTP | `code`                      | Meaning                                                       |
+| ---- | --------------------------- | ------------------------------------------------------------- |
+| 400  | `VALIDATION_FAILED`         | Body/params/query failed validation (see `details[].path`)    |
+| 400  | `MALFORMED_JSON`            | Body is not valid JSON                                        |
+| 401  | `AUTH_REQUIRED`             | No valid session (missing, expired, revoked)                  |
+| 401  | `INVALID_CREDENTIALS`       | Login failed (same response for unknown email/wrong password) |
+| 403  | `CSRF_INVALID`              | Missing/invalid `X-CSRF-Token`                                |
+| 403  | `ORIGIN_NOT_ALLOWED`        | Request origin not in the allowlist                           |
+| 404  | `NOT_FOUND`                 | Unknown route                                                 |
+| 404  | `REVIEW_NOT_FOUND`          | Review does not exist **or belongs to another user**          |
+| 404  | `FINDING_NOT_FOUND`         | Finding id not in this review                                 |
+| 404  | `DOCUMENT_NOT_FOUND`        | Document does not exist **or belongs to another user**        |
+| 409  | `DOCUMENT_VERSION_CONFLICT` | Document was saved elsewhere since the client loaded it       |
+| 409  | `EMAIL_ALREADY_REGISTERED`  | Registration with an existing email                           |
+| 409  | `REVIEW_NOT_COMPLETED`      | Finding update before the review completed                    |
+| 409  | `INVALID_STATE_TRANSITION`  | Finding status change not allowed                             |
+| 409  | `CONFLICT`                  | Concurrent modification; reload and retry                     |
+| 413  | `PAYLOAD_TOO_LARGE`         | Body exceeds `BODY_LIMIT`                                     |
+| 415  | `UNSUPPORTED_MEDIA_TYPE`    | Unsupported request encoding                                  |
+| 429  | `RATE_LIMITED`              | Too many requests; honor `RateLimit`/`Retry-After` headers    |
+| 500  | `INTERNAL_ERROR`            | Unexpected server error                                       |
 
 Review **processing** failures are not HTTP errors; they appear as `status: "failed"` with
 `errorCode`/`errorMessage` on the review and in the `review.failed` SSE event:
@@ -252,6 +255,70 @@ processing stops writing.
 ### `GET /reviews/{reviewId}/events`
 
 Server-Sent Events. See below.
+
+---
+
+## Document endpoints
+
+An author's working document: the text they write and edit, saved independently of reviews
+(a review still stores its own snapshot of the content it analysed). All endpoints require
+authentication and are scoped to the current user; another user's document is reported as
+`404 DOCUMENT_NOT_FOUND`.
+
+**Content is stored exactly as sent.** Indentation, tabs, blank lines, trailing spaces, line
+endings (`\n` and `\r\n`) and Unicode are never trimmed, normalized or converted, so `GET` returns
+the identical string. Only `title` is trimmed.
+
+| Field     | Rules                                                                                                      |
+| --------- | ---------------------------------------------------------------------------------------------------------- |
+| `title`   | 1–200 chars after trimming, well-formed Unicode                                                            |
+| `content` | string, may be empty; ≤ `DOCUMENT_MAX_CONTENT_CHARS` **code points** (default 50 000); well-formed Unicode |
+| `version` | (`PUT` only) the version the client last loaded; integer ≥ 1                                               |
+
+### `POST /documents` _(CSRF)_
+
+```json
+{ "title": "Quarterly Business Report", "content": "  Indented line\n\tTabbed line\n" }
+```
+
+`201 { "document": Document }`, header `Location: /api/v1/documents/{documentId}`.
+
+### `GET /documents?page=1&limit=20`
+
+Most recently updated first. `200 { "items": [DocumentSummary], "page", "limit", "total", "totalPages" }`.
+Summaries omit `content`.
+
+### `GET /documents/{documentId}`
+
+`200 { "document": Document }`. `400` for a malformed id, `404 DOCUMENT_NOT_FOUND`.
+
+### `PUT /documents/{documentId}` _(CSRF)_
+
+```json
+{ "title": "Quarterly Business Report", "content": "…", "version": 3 }
+```
+
+Replaces `title` and `content` only if `version` is still current, then increments `version`.
+`200 { "document": Document }`. If someone saved in the meantime (another tab or device):
+`409 DOCUMENT_VERSION_CONFLICT` and nothing is written; reload, then save again.
+
+### `DELETE /documents/{documentId}` _(CSRF)_
+
+`204`.
+
+```ts
+interface DocumentSummary {
+  documentId: string;
+  title: string;
+  contentLength: number; // code points
+  version: number; // starts at 1, +1 per update
+  createdAt: string;
+  updatedAt: string;
+}
+interface Document extends DocumentSummary {
+  content: string; // exactly as saved
+}
+```
 
 ---
 
@@ -432,6 +499,7 @@ Review status lifecycle: `pending → processing → completed | failed`. `cance
 | ------------------------- | -------------------------- | ---------------------------------------- |
 | Request body              | 512 kB                     | `BODY_LIMIT`                             |
 | Content length            | 50 000 code points         | `REVIEW_MAX_CONTENT_CHARS`               |
+| Document length           | 50 000 code points         | `DOCUMENT_MAX_CONTENT_CHARS`             |
 | API rate limit            | 300 req / 15 min / IP      | `RATE_LIMIT_MAX`, `RATE_LIMIT_WINDOW_MS` |
 | Login/register rate limit | 20 req / 15 min / IP       | `AUTH_RATE_LIMIT_MAX`                    |
 | Page size                 | 50                         | —                                        |
