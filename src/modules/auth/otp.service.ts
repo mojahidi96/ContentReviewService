@@ -1,4 +1,5 @@
 import { createHmac, randomInt, timingSafeEqual } from 'node:crypto';
+import { Types } from 'mongoose';
 import type { Env } from '../../config/env.js';
 import type { Logger } from '../../config/logger.js';
 import type { EmailService } from '../../infrastructure/email/email.service.js';
@@ -44,20 +45,15 @@ export class OtpService {
    */
   async consume(email: string, purpose: OtpPurpose, code: string): Promise<string | null> {
     const user = await UserModel.findOne({ email: normalizeEmail(email) }, { _id: 1 }).lean();
-    if (!user) {
-      // Same HMAC and comparison work as a real check.
-      this.matches(
-        this.hash('000000000000000000000000', purpose, '0000'),
-        this.hash('x', purpose, code),
-      );
-      return null;
-    }
-    const userId = user._id.toString();
+    // Unknown emails run the same query (against a random id that matches nothing) and the same
+    // HMAC and comparison, so response timing does not reveal whether an account exists.
+    const lookupId = user?._id ?? new Types.ObjectId();
+    const userId = lookupId.toString();
 
     // Reserve an attempt atomically before comparing, so parallel guesses cannot exceed the cap.
     const record = await OtpModel.findOneAndUpdate(
       {
-        userId: user._id,
+        userId: lookupId,
         purpose,
         expiresAt: { $gt: new Date() },
         attempts: { $lt: this.env.OTP_MAX_ATTEMPTS },
@@ -65,7 +61,7 @@ export class OtpService {
       { $inc: { attempts: 1 } },
       { returnDocument: 'after' },
     ).lean();
-    if (!record) {
+    if (!user || !record) {
       this.matches(this.hash(userId, purpose, '0000'), this.hash(userId, purpose, code));
       return null;
     }
