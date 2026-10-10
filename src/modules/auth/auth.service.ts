@@ -60,6 +60,25 @@ export class AuthService {
     return this.issueSession(toUserDto(user));
   }
 
+  /** Starts a session for a user whose identity was already proven (e.g. by an emailed code). */
+  async loginVerifiedUser(userId: string): Promise<IssuedSession> {
+    const user = await UserModel.findById(userId).lean();
+    if (!user) throw Errors.otpInvalid();
+    return this.issueSession(toUserDto(user));
+  }
+
+  /**
+   * Sets a new password and revokes every existing session of the user. Sessions are rows in
+   * the sessions collection, so deleting them is an immediate, server-enforced revocation.
+   */
+  async resetPassword(userId: string, newPassword: string): Promise<IssuedSession> {
+    const passwordHash = await hashPassword(newPassword, this.env.BCRYPT_ROUNDS);
+    const user = await UserModel.findByIdAndUpdate(userId, { $set: { passwordHash } }).lean();
+    if (!user) throw Errors.otpInvalid();
+    await SessionModel.deleteMany({ userId });
+    return this.issueSession(toUserDto(user));
+  }
+
   async logout(sessionId: string): Promise<void> {
     await SessionModel.deleteOne({ _id: sessionId });
   }

@@ -9,6 +9,7 @@ import { ensureIndexes } from '../../src/config/database.js';
 import { loadEnv, type Env } from '../../src/config/env.js';
 import { createLogger } from '../../src/config/logger.js';
 import { createContainer, type Container } from '../../src/container.js';
+import type { EmailService } from '../../src/infrastructure/email/email.service.js';
 import { NoopMetrics, type MetricsRecorder } from '../../src/infrastructure/metrics/metrics.js';
 import { MockPythonLlmClient } from '../../src/integrations/python-llm/mock-llm-client.js';
 import type { PythonLlmClient } from '../../src/integrations/python-llm/llm-client.js';
@@ -69,6 +70,7 @@ export function createTestApp(
     env?: Record<string, string>;
     llmClient?: PythonLlmClient;
     metrics?: MetricsRecorder;
+    emailService?: EmailService;
     logDestination?: DestinationStream;
   } = {},
 ): TestApp {
@@ -77,6 +79,7 @@ export function createTestApp(
   const container = createContainer(env, createLogger(env, options.logDestination), {
     llmClient: options.llmClient ?? llm,
     metrics: options.metrics ?? new NoopMetrics(),
+    ...(options.emailService ? { emailService: options.emailService } : {}),
   });
   return { app: createApp(container), container, llm };
 }

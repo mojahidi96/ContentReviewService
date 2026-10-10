@@ -36,6 +36,7 @@ export const Errors = {
   authRequired: () => new AppError(ErrorCode.AUTH_REQUIRED, 401, 'Authentication is required.'),
   invalidCredentials: () =>
     new AppError(ErrorCode.INVALID_CREDENTIALS, 401, 'The email or password is incorrect.'),
+  otpInvalid: () => new AppError(ErrorCode.OTP_INVALID, 401, 'The code is invalid or has expired.'),
   emailTaken: () =>
     new AppError(
       ErrorCode.EMAIL_ALREADY_REGISTERED,

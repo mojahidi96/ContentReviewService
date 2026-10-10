@@ -109,6 +109,7 @@ should branch on `code`.
 | 400  | `MALFORMED_JSON`            | Body is not valid JSON                                        |
 | 401  | `AUTH_REQUIRED`             | No valid session (missing, expired, revoked)                  |
 | 401  | `INVALID_CREDENTIALS`       | Login failed (same response for unknown email/wrong password) |
+| 401  | `OTP_INVALID`               | Emailed code wrong, expired, used, exhausted or email unknown |
 | 403  | `CSRF_INVALID`              | Missing/invalid `X-CSRF-Token`                                |
 | 403  | `ORIGIN_NOT_ALLOWED`        | Request origin not in the allowlist                           |
 | 404  | `NOT_FOUND`                 | Unknown route                                                 |
@@ -166,6 +167,46 @@ Errors: `400`, `403`, `409 EMAIL_ALREADY_REGISTERED`, `429`.
 
 `{ "email": "...", "password": "..." }` → `200 { "user": User, "csrfToken": "string" }` + cookie.
 Errors: `401 INVALID_CREDENTIALS` (generic), `400`, `403`, `429`.
+
+### Emailed codes: sign-in and password reset
+
+A 4-digit code is emailed to the account's address and exchanged for a session. None of these
+endpoints needs a session; all require CSRF like `login`. Request bodies are strict (unknown
+keys → `400`). `email` follows the `register` rules.
+
+Codes: 4 digits, valid `expiresInSeconds` (default 300), **single use**, and **at most 5 failed
+attempts per code** (`OTP_MAX_ATTEMPTS`); the code is deleted after the 5th failure, so further
+attempts (even with the right code) get `401 OTP_INVALID` until a new code is requested. A new
+request replaces any earlier code for the same purpose. Sign-in and reset codes are independent
+and not interchangeable.
+
+#### `POST /auth/otp/request` _(CSRF)_ and `POST /auth/password/forgot` _(CSRF)_
+
+`{ "email": "alice@example.com" }` → `202 { "expiresInSeconds": 300 }` (`Cache-Control: no-store`).
+
+`otp/request` sends a sign-in code, `password/forgot` a password-reset code. The response is
+**identical whether or not the account exists**; the email is sent after responding, and a failed
+send does not change the response. Errors: `400`, `403`, `429`.
+
+#### `POST /auth/otp/login` _(CSRF)_
+
+`{ "email": "...", "otp": "0420" }` (`otp` matches `^\d{4}$`) →
+`200 { "user": User, "csrfToken": "string" }` + session cookie, exactly like `login`.
+Errors: `401 OTP_INVALID` (same response for wrong, expired, used, exhausted or unknown email),
+`400` (`details[].path` e.g. `body.otp`), `403`, `429`.
+
+#### `POST /auth/password/reset` _(CSRF)_
+
+`{ "email": "...", "otp": "0420", "newPassword": "at least 12 chars" }` →
+`200 { "user": User, "csrfToken": "string" }` + session cookie. `newPassword` follows the
+`register` password rules (12 characters minimum, ≤ 72 UTF-8 bytes). On success the password is
+changed, **every other session of the user is revoked**, and a new session is started.
+Errors: `401 OTP_INVALID`, `400` (e.g. `body.otp`, `body.newPassword`), `403`, `429`.
+
+Rate limits (per IP **and** per email, applied whether or not the account exists; `429
+RATE_LIMITED` with `Retry-After`): code requests 3 per 15 min per email and 10 per IP;
+verification endpoints count failed attempts only, 10 per email and 30 per IP per 15 min.
+These come in addition to the shared auth limiter.
 
 ### `POST /auth/logout` _(auth, CSRF)_
 
@@ -506,12 +547,15 @@ Review status lifecycle: `pending → processing → completed | failed`. `cance
 
 ## 8. Limits
 
-| Limit                     | Default                    | Config                                   |
-| ------------------------- | -------------------------- | ---------------------------------------- |
-| Request body              | 512 kB                     | `BODY_LIMIT`                             |
-| Content length            | 50 000 code points         | `REVIEW_MAX_CONTENT_CHARS`               |
-| Document length           | 50 000 code points         | `DOCUMENT_MAX_CONTENT_CHARS`             |
-| API rate limit            | 300 req / 15 min / IP      | `RATE_LIMIT_MAX`, `RATE_LIMIT_WINDOW_MS` |
-| Login/register rate limit | 20 req / 15 min / IP       | `AUTH_RATE_LIMIT_MAX`                    |
-| Page size                 | 50                         | —                                        |
-| Review retention          | 90 days, then auto-deleted | `REVIEW_RETENTION_DAYS`                  |
+| Limit                     | Default                      | Config                                   |
+| ------------------------- | ---------------------------- | ---------------------------------------- |
+| Request body              | 512 kB                       | `BODY_LIMIT`                             |
+| Content length            | 50 000 code points           | `REVIEW_MAX_CONTENT_CHARS`               |
+| Document length           | 50 000 code points           | `DOCUMENT_MAX_CONTENT_CHARS`             |
+| API rate limit            | 300 req / 15 min / IP        | `RATE_LIMIT_MAX`, `RATE_LIMIT_WINDOW_MS` |
+| Login/register rate limit | 20 req / 15 min / IP         | `AUTH_RATE_LIMIT_MAX`                    |
+| Emailed code requests     | 3 / 15 min / email, 10 / IP  | `OTP_REQUEST_LIMIT_PER_EMAIL`, `_PER_IP` |
+| Emailed code failures     | 10 / 15 min / email, 30 / IP | `OTP_VERIFY_LIMIT_PER_EMAIL`, `_PER_IP`  |
+| Emailed code lifetime     | 300 s, 5 failed attempts     | `OTP_TTL_SECONDS`, `OTP_MAX_ATTEMPTS`    |
+| Page size                 | 50                           | —                                        |
+| Review retention          | 90 days, then auto-deleted   | `REVIEW_RETENTION_DAYS`                  |

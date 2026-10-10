@@ -9,10 +9,15 @@ import { ErrorCode } from '../shared/errors/error-codes.js';
 export function createRateLimiter(options: {
   windowMs: number;
   limit: number;
+  keyGenerator?: (req: Request) => string;
+  /** Count only failed (status >= 400) requests. */
+  skipSuccessfulRequests?: boolean;
 }): RateLimitRequestHandler {
   return rateLimit({
     windowMs: options.windowMs,
     limit: options.limit,
+    ...(options.keyGenerator ? { keyGenerator: options.keyGenerator } : {}),
+    ...(options.skipSuccessfulRequests ? { skipSuccessfulRequests: true } : {}),
     standardHeaders: 'draft-8',
     legacyHeaders: false,
     handler: (req: Request, res: Response) => {
