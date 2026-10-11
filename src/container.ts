@@ -131,6 +131,7 @@ export function createContainer(
       events,
       logger: logger.child({ component: 'review-service' }),
       retentionDays: env.REVIEW_RETENTION_DAYS,
+      llmClient,
     }),
     documentService: new DocumentService(),
     worker,

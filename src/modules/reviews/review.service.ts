@@ -1,6 +1,10 @@
 import type { Logger } from '../../config/logger.js';
+import type { PythonLlmClient } from '../../integrations/python-llm/llm-client.js';
+import { LlmError } from '../../integrations/python-llm/llm.errors.js';
+import type { ModelCatalog } from '../../integrations/python-llm/llm.types.js';
 import type { JobQueue } from '../../infrastructure/jobs/job-queue.js';
-import { Errors } from '../../shared/errors/app-error.js';
+import { AppError, Errors } from '../../shared/errors/app-error.js';
+import { ErrorCode } from '../../shared/errors/error-codes.js';
 import { sha256Hex } from '../../shared/utils/hash.js';
 import { toObjectId } from '../../shared/utils/ids.js';
 import { codePointLength } from '../../shared/utils/offsets.js';
@@ -46,10 +50,14 @@ const SUMMARY_PROJECTION = {
   findingCount: 1,
   errorCode: 1,
   errorMessage: 1,
+  errorDetails: 1,
+  model: 1,
   createdAt: 1,
   updatedAt: 1,
   completedAt: 1,
 } as const;
+
+const MODEL_CATALOG_TTL_MS = 5 * 60_000;
 
 /** All queries are scoped by userId: a review owned by someone else is indistinguishable from a missing one. */
 export class ReviewService {
@@ -59,11 +67,48 @@ export class ReviewService {
       events: ReviewEventStore;
       logger: Logger;
       retentionDays: number;
+      llmClient: PythonLlmClient;
     },
   ) {}
 
+  private catalog: { value: ModelCatalog; fetchedAt: number } | null = null;
+
+  /** Models the author may pick. Cached briefly; the Python service stays the source of truth. */
+  async listModels(): Promise<ModelCatalog> {
+    if (this.catalog && Date.now() - this.catalog.fetchedAt < MODEL_CATALOG_TTL_MS) {
+      return this.catalog.value;
+    }
+    try {
+      const value = await this.deps.llmClient.listModels();
+      this.catalog = { value, fetchedAt: Date.now() };
+      return value;
+    } catch (err) {
+      if (!(err instanceof LlmError)) throw err;
+      this.deps.logger.warn({ err }, 'Could not load the model catalog');
+      throw new AppError(
+        ErrorCode.LLM_SERVICE_UNAVAILABLE,
+        503,
+        'The list of review models is temporarily unavailable.',
+      );
+    }
+  }
+
+  /** Rejects a model the AI service does not offer. If the catalog is unreachable the AI service validates it later. */
+  private async assertModelAllowed(model: string): Promise<void> {
+    let catalog: ModelCatalog;
+    try {
+      catalog = await this.listModels();
+    } catch {
+      return;
+    }
+    if (!catalog.models.includes(model)) {
+      throw Errors.validation([{ path: 'model', message: 'This model is not available.' }]);
+    }
+  }
+
   async create(userId: string, input: CreateReviewBody): Promise<CreatedReview> {
     const { retentionDays } = this.deps;
+    if (input.model) await this.assertModelAllowed(input.model);
     const review = await ReviewModel.create({
       userId: toObjectId(userId),
       documentTitle: input.documentTitle,
@@ -71,6 +116,7 @@ export class ReviewService {
       contentHash: sha256Hex(input.content),
       contentLength: codePointLength(input.content),
       categories: input.categories ?? [],
+      model: input.model ?? null,
       status: 'pending',
       expiresAt: retentionDays > 0 ? new Date(Date.now() + retentionDays * 86_400_000) : null,
     });

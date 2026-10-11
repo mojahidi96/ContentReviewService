@@ -43,9 +43,23 @@ export const contentReviewResponseSchema = z.object({
   usage: z.object({ inputTokens: tokenCount, outputTokens: tokenCount }),
 });
 
+export const modelCatalogSchema = z.object({
+  defaultModel: z.string().min(1).max(200),
+  models: z.array(z.string().min(1).max(200)).min(1).max(100),
+});
+
+/** `details` on a 429 LLM_QUOTA_EXHAUSTED; every field is optional because the provider may omit it. */
+const quotaDetailsSchema = z.object({
+  model: z.string().max(200).nullable().optional(),
+  quotaScope: z.enum(['daily', 'minute', 'unknown']).optional(),
+  retryAfterSeconds: z.number().int().nonnegative().optional(),
+  resetAt: z.string().max(40).optional(),
+});
+
 export const pythonErrorBodySchema = z.object({
   error: z.object({
     code: z.string().max(100),
     message: z.string().max(1000).optional(),
+    details: quotaDetailsSchema.optional(),
   }),
 });

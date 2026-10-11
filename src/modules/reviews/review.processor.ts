@@ -118,6 +118,7 @@ export class ReviewProcessor {
             completedAt: now,
             errorCode: null,
             errorMessage: null,
+            errorDetails: null,
           },
         },
       );
@@ -149,13 +150,16 @@ export class ReviewProcessor {
     attempt: number | null,
     errorCode: string,
     errorMessage: string,
+    errorDetails: Record<string, unknown> | null = null,
   ): Promise<void> {
     const filter: Record<string, unknown> = {
       _id: reviewId,
       status: { $in: reviewSourcesFor('failed') },
     };
     if (attempt !== null) filter.jobAttempt = attempt;
-    await ReviewModel.updateOne(filter, { $set: { status: 'failed', errorCode, errorMessage } });
+    await ReviewModel.updateOne(filter, {
+      $set: { status: 'failed', errorCode, errorMessage, errorDetails },
+    });
 
     const review = await ReviewModel.findById(reviewId).lean<ReviewRecord>();
     if (review?.status === 'failed') await this.republishTerminalEvents(review);
@@ -183,7 +187,8 @@ export class ReviewProcessor {
 
     log.error({ errorCode, err: summarize(err) }, 'Review failed permanently');
     const message = err instanceof LlmError ? err.publicMessage : GENERIC_FAILURE_MESSAGE;
-    await this.failReview(reviewId, attempt, errorCode, message);
+    const details = err instanceof LlmError ? (err.publicDetails ?? null) : null;
+    await this.failReview(reviewId, attempt, errorCode, message, details);
     await this.deps.jobQueue.fail(job, workerId, errorCode);
     return 'failed';
   }
@@ -197,6 +202,7 @@ export class ReviewProcessor {
           requestId: reviewId,
           content: review.content,
           ...(this.deps.language ? { language: this.deps.language } : {}),
+          ...(review.model ? { model: review.model } : {}),
         },
         { signal, correlationId: reviewId },
       );
@@ -247,6 +253,7 @@ export class ReviewProcessor {
         status: 'failed',
         errorCode: review.errorCode ?? ErrorCode.PROCESSING_FAILED,
         errorMessage: review.errorMessage ?? GENERIC_FAILURE_MESSAGE,
+        ...(review.errorDetails ? { errorDetails: review.errorDetails } : {}),
         occurredAt: new Date().toISOString(),
       });
     }

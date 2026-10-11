@@ -46,6 +46,23 @@ describe('review API', () => {
     }
   });
 
+  it('lists selectable models and rejects unknown ones', async () => {
+    const models = await alice.get('/api/v1/reviews/models').expect(200);
+    expect(models.body).toEqual({
+      defaultModel: 'mock-rules-v2',
+      models: ['mock-rules-v2', 'mock-rules-v3'],
+    });
+    const res = await alice
+      .post('/api/v1/reviews')
+      .set('X-CSRF-Token', aliceCsrf)
+      .send({ documentTitle: 'T', content: SAMPLE_CONTENT, model: 'not-a-model' })
+      .expect(400);
+    expect(res.body.error.details).toEqual([
+      { path: 'model', message: 'This model is not available.' },
+    ]);
+    expect(await ReviewModel.countDocuments({})).toBe(0);
+  });
+
   it('creates a review and returns 202 without waiting for analysis', async () => {
     const res = await alice
       .post('/api/v1/reviews')

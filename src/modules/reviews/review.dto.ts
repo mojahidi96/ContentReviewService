@@ -22,6 +22,9 @@ export interface ReviewSummaryDto {
   findingCount: number;
   errorCode: string | null;
   errorMessage: string | null;
+  /** E.g. `{ model, quotaScope, retryAfterSeconds, resetAt }` for LLM_SERVICE_RATE_LIMITED. */
+  errorDetails: Record<string, unknown> | null;
+  model: string | null;
   createdAt: string;
   updatedAt: string;
   completedAt: string | null;
@@ -63,6 +66,8 @@ export type ReviewSummaryRecord = Pick<
   | 'findingCount'
   | 'errorCode'
   | 'errorMessage'
+  | 'errorDetails'
+  | 'model'
   | 'createdAt'
   | 'updatedAt'
   | 'completedAt'
@@ -77,6 +82,8 @@ export function toReviewSummaryDto(r: ReviewSummaryRecord): ReviewSummaryDto {
     findingCount: r.findingCount,
     errorCode: r.errorCode,
     errorMessage: r.errorMessage,
+    errorDetails: r.errorDetails ?? null,
+    model: r.model ?? null,
     createdAt: r.createdAt.toISOString(),
     updatedAt: r.updatedAt.toISOString(),
     completedAt: r.completedAt ? r.completedAt.toISOString() : null,

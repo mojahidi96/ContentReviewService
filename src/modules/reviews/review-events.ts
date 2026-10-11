@@ -39,6 +39,7 @@ export interface ReviewEventPayloads {
     status: 'failed';
     errorCode: string;
     errorMessage: string;
+    errorDetails?: Record<string, unknown>;
     occurredAt: string;
   };
 }

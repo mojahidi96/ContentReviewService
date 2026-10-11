@@ -131,7 +131,7 @@ describe('HttpPythonLlmClient', () => {
     [503, 'AI_CONCURRENCY_LIMIT', LlmUnavailableError, true, 2],
     [502, 'BAD_GATEWAY', LlmUnavailableError, true, undefined],
     [500, 'INTERNAL', LlmUnavailableError, true, undefined],
-    [504, 'GATEWAY_TIMEOUT', LlmTimeoutError, true, undefined],
+    [504, 'GATEWAY_TIMEOUT', LlmTimeoutError, true, 1],
     [400, 'SOMETHING', LlmRejectedError, false, undefined],
   ])(
     'maps HTTP %i %s to %o (retryable=%s, maxRetries=%s)',
@@ -156,6 +156,62 @@ describe('HttpPythonLlmClient', () => {
     const err = await review(client).catch((e: unknown) => e);
     expect(err).toBeInstanceOf(LlmRateLimitedError);
     expect((err as LlmRateLimitedError).retryAfterMs).toBe(7000);
+  });
+
+  it('sends the chosen model and omits it otherwise', async () => {
+    handler = (_req, _body, res) => json(res, 200, validContentReviewResponse('req_1'));
+    await review(client, { ...request, model: 'gemini-3.8-flash' });
+    expect(JSON.parse(received[0]!.body)).toMatchObject({ model: 'gemini-3.8-flash' });
+  });
+
+  it('exposes quota details and does not retry a daily quota', async () => {
+    const resetAt = '2026-10-11T05:30:00+00:00';
+    handler = (_req, _body, res) =>
+      json(
+        res,
+        429,
+        {
+          error: {
+            code: 'LLM_QUOTA_EXHAUSTED',
+            message: 'The daily quota for model m1 is exhausted. It resets in about 1h 58m.',
+            details: { model: 'm1', quotaScope: 'daily', retryAfterSeconds: 7105, resetAt },
+          },
+        },
+        { 'retry-after': '7105' },
+      );
+    const err = (await review(client).catch((e: unknown) => e)) as LlmRateLimitedError;
+    expect(err).toBeInstanceOf(LlmRateLimitedError);
+    expect(err.retryable).toBe(false);
+    expect(err.publicMessage).toContain('1h 58m');
+    expect(err.publicDetails).toEqual({
+      model: 'm1',
+      quotaScope: 'daily',
+      retryAfterSeconds: 7105,
+      resetAt,
+    });
+  });
+
+  it('retries a short per-minute quota', async () => {
+    handler = (_req, _body, res) =>
+      json(res, 429, {
+        error: {
+          code: 'LLM_QUOTA_EXHAUSTED',
+          message: 'x',
+          details: { model: 'm1', quotaScope: 'minute', retryAfterSeconds: 30 },
+        },
+      });
+    const err = (await review(client).catch((e: unknown) => e)) as LlmRateLimitedError;
+    expect(err.retryable).toBe(true);
+  });
+
+  it('lists the models the Python service offers', async () => {
+    handler = (_req, _body, res) => json(res, 200, { defaultModel: 'm1', models: ['m1', 'm2'] });
+    await expect(client.listModels()).resolves.toEqual({
+      defaultModel: 'm1',
+      models: ['m1', 'm2'],
+    });
+    expect(received[0]!.url).toBe('/internal/v1/content-reviews/models');
+    expect(received[0]!.headers.authorization).toBe(`Bearer ${TOKEN}`);
   });
 
   it('honors Retry-After on 503', async () => {

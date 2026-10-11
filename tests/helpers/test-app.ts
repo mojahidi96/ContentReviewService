@@ -119,7 +119,12 @@ export const SAMPLE_CONTENT = 'The report have several mistake. Please recieve t
 export async function createReview(
   agent: Agent,
   csrfToken: string,
-  body: Partial<{ documentTitle: string; content: string; categories: string[] }> = {},
+  body: Partial<{
+    documentTitle: string;
+    content: string;
+    categories: string[];
+    model: string;
+  }> = {},
 ): Promise<{ reviewId: string; eventsUrl: string }> {
   const res = await agent
     .post('/api/v1/reviews')

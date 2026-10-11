@@ -223,12 +223,25 @@ These come in addition to the shared auth limiter.
 All review endpoints require authentication. Every query is scoped to the current user;
 another user's review is reported as `404 REVIEW_NOT_FOUND`.
 
+### `GET /reviews/models` _(auth)_
+
+Models the author may choose from (feeds the UI dropdown). The list comes from the AI service and
+is cached for 5 minutes.
+
+```json
+{ "defaultModel": "gemini-3.6-flash", "models": ["gemini-3.6-flash", "gemini-3.8-flash"] }
+```
+
+Errors: `503 LLM_SERVICE_UNAVAILABLE` when the list cannot be loaded (the UI should fall back to
+"default model" and still allow submitting without `model`).
+
 ### `POST /reviews` _(CSRF)_
 
 ```json
 {
   "documentTitle": "Quarterly Business Report",
   "content": "The report have several mistake.",
+  "model": "gemini-3.8-flash",
   "categories": ["grammar", "spelling"]
 }
 ```
@@ -237,6 +250,7 @@ another user's review is reported as `404 REVIEW_NOT_FOUND`.
 | --------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `documentTitle` | 1–200 chars after trimming                                                                                                                                                  |
 | `content`       | not blank; ≤ `REVIEW_MAX_CONTENT_CHARS` **code points** (default 50 000); well-formed Unicode. Stored **exactly as sent** (no trimming/normalization) so offsets stay valid |
+| `model`         | **optional**: one of `GET /reviews/models`. Omitted = the default model. An unknown value is `400 VALIDATION_FAILED` (`details[].path = "model"`)                           |
 | `categories`    | **optional**, informational: non-empty, unique list of `Category` values. Stored and echoed back, but every issue type is always checked                                    |
 
 Response `202 Accepted` (returns immediately; analysis runs in the background), header
@@ -364,6 +378,16 @@ interface Document extends DocumentSummary {
 
 ---
 
+### Quota failures
+
+When the AI provider's quota is exhausted the review ends as `failed` with
+`errorCode: "LLM_SERVICE_RATE_LIMITED"`. `errorMessage` is ready to display, for example
+_"The daily quota for model gemini-3.6-flash is exhausted. It resets in about 1h 58m. Try again
+later or choose a different model."_ `errorDetails.resetAt` / `retryAfterSeconds` let the UI show a
+countdown or local time. A short per-minute quota (≤ 5 min) is retried automatically first; a long
+(daily) quota fails immediately, because retrying cannot succeed. The author can resubmit with a
+different `model`.
+
 ## 5. Server-Sent Events
 
 `GET /api/v1/reviews/{reviewId}/events` (auth required; cookie sent via `withCredentials`).
@@ -404,7 +428,7 @@ All payloads include `reviewId` and `occurredAt`.
 | `review.progress`  | `{ reviewId, stage, attempt, nextAttemptAt?, occurredAt }` — `stage` ∈ `analyzing`, `validating`, `persisting`, `retrying` (`nextAttemptAt` only for `retrying`) |
 | `finding.detected` | `{ reviewId, finding: Finding, occurredAt }` — one per finding, ordered by offset                                                                                |
 | `review.completed` | `{ reviewId, status: "completed", findingCount, completedAt, occurredAt }` — terminal                                                                            |
-| `review.failed`    | `{ reviewId, status: "failed", errorCode, errorMessage, occurredAt }` — terminal                                                                                 |
+| `review.failed`    | `{ reviewId, status: "failed", errorCode, errorMessage, errorDetails?, occurredAt }` — terminal; see "Quota failures" below                                      |
 
 Typical sequence: `review.started` → `review.progress(analyzing)` → (`review.progress(retrying)`
 → `review.progress(analyzing)`)\* → `review.progress(validating)` → `review.progress(persisting)` →
@@ -498,6 +522,14 @@ type Category =
   | 'inappropriate_language'
   | 'profanity'; // only on reviews created before the AI service v2; new findings never use it
 
+// Present for errorCode === 'LLM_SERVICE_RATE_LIMITED' (provider quota exhausted).
+interface ErrorDetails {
+  model: string | null; // model whose quota ran out
+  quotaScope: 'daily' | 'minute' | 'unknown';
+  retryAfterSeconds: number | null;
+  resetAt: string | null; // ISO-8601 UTC: when the quota is expected to reset
+}
+
 interface ReviewSummary {
   reviewId: string;
   documentTitle: string;
@@ -506,6 +538,8 @@ interface ReviewSummary {
   findingCount: number; // 0 until completed
   errorCode: string | null; // set when status === 'failed'
   errorMessage: string | null; // user-safe
+  errorDetails: ErrorDetails | null; // structured reason, e.g. quota reset time
+  model: string | null; // model the author picked; null = default
   createdAt: string;
   updatedAt: string;
   completedAt: string | null;
