@@ -55,6 +55,29 @@ validation) → 404 → error handler`.
   timing reveals whether an account exists. Registration does reveal duplicates (`409`); this is
   a deliberate UX trade-off, mitigated by the auth rate limiter.
 
+### Emailed codes (sign-in and password reset)
+
+- `crypto.randomInt` 4-digit codes stored in `otp_codes` as `HMAC-SHA256(OTP_HMAC_SECRET,
+userId:purpose:code)`, never in clear. HMAC with a server secret (rather than a bare hash) means
+  a leaked database cannot be used to brute-force the 10 000 possible codes offline. The secret is
+  required in production; elsewhere it is derived from `AUTH_JWT_SECRET`.
+- One document per `(userId, purpose)` (unique index): a new request overwrites the old code.
+  TTL index on `expiresAt`; deleted on use and after `OTP_MAX_ATTEMPTS` failures.
+- Verification reserves an attempt with an atomic `$inc` _before_ comparing (parallel guesses
+  cannot exceed the cap), compares with `timingSafeEqual`, and consumes the code with a
+  conditional delete so concurrent uses succeed at most once. Unknown emails perform the same
+  HMAC and comparison. All failures are one `401 OTP_INVALID`.
+- The request endpoints respond `202` before doing any lookup, so timing and body are identical
+  for known and unknown emails; lookup, storage and sending run in the background (`OtpService`
+  tracks them so tests and shutdown can await them). Send failures are logged without the code.
+- **Session revocation on reset**: sessions already live server-side in `sessions`, so a reset
+  deletes every session row of the user and starts a new one. No `tokenVersion` was needed.
+- Rate limits are `express-rate-limit` instances keyed by IP and by SHA-256 of the normalised
+  email (in-memory per instance, like the other limiters). Verify limits count failures only.
+- `EmailService` has an SMTP implementation (nodemailer, `SMTP_URL`/`MAIL_FROM`) and a console
+  one (`MAIL_TRANSPORT=console`) that prints codes to stdout; startup refuses it when
+  `NODE_ENV=production`.
+
 ## CSRF
 
 Signed double-submit cookie via `csrf-csrf`:
@@ -149,6 +172,7 @@ originalText)`, duplicates collapse, and the findings array is replaced atomical
 | --------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `users`         | unique lower-cased `email`; `passwordHash` excluded from queries by default                                                                                                                                                |
 | `sessions`      | `_id` = JWT `jti`; TTL on `expiresAt`                                                                                                                                                                                      |
+| `otp_codes`     | unique `{userId, purpose}`; `codeHash` (HMAC), `attempts`; TTL on `expiresAt`                                                                                                                                              |
 | `reviews`       | owner `userId`; `content`, `contentHash` (sha256), `contentLength`; embedded `findings`; `eventSeq`, `jobAttempt`; TTL on `expiresAt`. Indexes `{userId, createdAt}`, `{userId, status, createdAt}`, `{status, updatedAt}` |
 | `review_events` | unique `{reviewId, seq}` and `{reviewId, dedupeKey}`; TTL on `expiresAt` (same as review)                                                                                                                                  |
 | `review_jobs`   | unique `reviewId`; `{status, runAfter}`, `{status, lockedUntil}`; finished jobs TTL 7 days                                                                                                                                 |

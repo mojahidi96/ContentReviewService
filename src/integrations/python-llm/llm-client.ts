@@ -2,6 +2,7 @@ import type {
   ContentReviewRequest,
   ContentReviewResponse,
   LlmHealth,
+  ModelCatalog,
   ReviewContentOptions,
 } from './llm.types.js';
 
@@ -15,6 +16,8 @@ export interface PythonLlmClient {
     request: ContentReviewRequest,
     options?: ReviewContentOptions,
   ): Promise<ContentReviewResponse>;
+  /** Models the author may choose from, as allowed by the Python service. */
+  listModels(options?: { signal?: AbortSignal }): Promise<ModelCatalog>;
   checkHealth(): Promise<LlmHealth>;
   close(): Promise<void>;
 }

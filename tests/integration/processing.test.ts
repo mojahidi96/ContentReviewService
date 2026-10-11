@@ -130,6 +130,40 @@ describe('review processing', () => {
     });
   });
 
+  it('passes the chosen model to the AI service', async () => {
+    const { reviewId } = await createReview(agent, csrf, { model: 'mock-rules-v3' });
+    const review = await processUntilSettled(t.container, reviewId);
+    expect(review).toMatchObject({ status: 'completed', model: 'mock-rules-v3' });
+    expect(t.llm.calls[0]).toMatchObject({ model: 'mock-rules-v3' });
+  });
+
+  it('fails fast on a daily quota and stores when it resets', async () => {
+    const details = {
+      model: 'mock-rules-v2',
+      quotaScope: 'daily' as const,
+      retryAfterSeconds: 7105,
+      resetAt: '2026-10-11T05:30:00+00:00',
+    };
+    t.llm.setHandler(() => {
+      throw new LlmRateLimitedError('429', {
+        quota: details,
+        upstreamMessage:
+          'The daily quota for model mock-rules-v2 is exhausted. It resets in about 1h 58m.',
+      });
+    });
+    const { reviewId } = await createReview(agent, csrf);
+    const review = await processUntilSettled(t.container, reviewId);
+    expect(review).toMatchObject({
+      status: 'failed',
+      errorCode: 'LLM_SERVICE_RATE_LIMITED',
+      errorMessage: expect.stringContaining('1h 58m'),
+      errorDetails: details,
+    });
+    expect(t.llm.calls).toHaveLength(1);
+    const failed = await ReviewEventModel.findOne({ reviewId, type: 'review.failed' }).lean();
+    expect(failed?.data).toMatchObject({ errorDetails: details });
+  });
+
   it('does not retry non-retryable errors', async () => {
     t.llm.setHandler(() => {
       throw new LlmRejectedError('bad request', 400, 'INVALID_REQUEST');

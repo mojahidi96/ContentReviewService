@@ -22,6 +22,9 @@ export function createReviewBodySchema(maxContentChars: number) {
         (s) => codePointLength(s) <= maxContentChars,
         `Content must be at most ${maxContentChars} characters`,
       ),
+    // Optional Gemini model; omitted = the AI service's default. Checked against the catalog
+    // in ReviewService.create.
+    model: z.string().trim().min(1).max(100).optional(),
     // Optional and informational: the AI service always checks every issue type. Kept so
     // existing clients that still send it continue to work.
     categories: z

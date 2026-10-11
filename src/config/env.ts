@@ -1,3 +1,4 @@
+import { createHmac } from 'node:crypto';
 import { z } from 'zod';
 import { PYTHON_MAX_CONTENT_CHARS } from '../integrations/python-llm/llm.schemas.js';
 
@@ -90,6 +91,25 @@ const envSchema = z
       .regex(/^[A-Za-z0-9_-]+$/)
       .default('content_review_csrf'),
 
+    OTP_TTL_SECONDS: int(30, 3600).default(300),
+    OTP_MAX_ATTEMPTS: int(1, 20).default(5),
+    // Required in production. Elsewhere it is derived from AUTH_JWT_SECRET.
+    OTP_HMAC_SECRET: z
+      .string()
+      .min(32, 'OTP_HMAC_SECRET must be at least 32 characters')
+      .optional(),
+    OTP_RATE_LIMIT_WINDOW_MS: int(1_000, 86_400_000).default(900_000),
+    OTP_REQUEST_LIMIT_PER_EMAIL: int(1, 1_000).default(3),
+    OTP_REQUEST_LIMIT_PER_IP: int(1, 10_000).default(10),
+    // Verify limits count failed attempts only.
+    OTP_VERIFY_LIMIT_PER_EMAIL: int(1, 1_000).default(10),
+    OTP_VERIFY_LIMIT_PER_IP: int(1, 10_000).default(30),
+
+    // console prints codes to stdout and is refused in production.
+    MAIL_TRANSPORT: z.enum(['console', 'smtp']).default('console'),
+    SMTP_URL: z.string().default(''),
+    MAIL_FROM: z.string().default(''),
+
     PYTHON_LLM_MODE: z.enum(['http', 'mock']).default('http'),
     AI_SERVICE_BASE_URL: z.url({ protocol: /^https?$/ }).default('http://localhost:8000'),
     INTERNAL_SERVICE_TOKEN: z.string().default(''),
@@ -158,7 +178,49 @@ const envSchema = z
         message: 'JOB_BACKOFF_MAX_MS must be >= JOB_BACKOFF_BASE_MS',
       });
     }
+    if (env.MAIL_TRANSPORT === 'smtp') {
+      for (const key of ['SMTP_URL', 'MAIL_FROM'] as const) {
+        if (env[key].trim() === '') {
+          ctx.addIssue({
+            code: 'custom',
+            path: [key],
+            message: `${key} is required when MAIL_TRANSPORT=smtp`,
+          });
+        }
+      }
+    }
     if (env.NODE_ENV !== 'production') return;
+
+    if (env.MAIL_TRANSPORT === 'console') {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['MAIL_TRANSPORT'],
+        message:
+          'The console mail transport prints codes to stdout and cannot be used in production',
+      });
+    }
+    if (!env.OTP_HMAC_SECRET) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['OTP_HMAC_SECRET'],
+        message: 'OTP_HMAC_SECRET is required in production',
+      });
+    } else {
+      if (PLACEHOLDER_PATTERN.test(env.OTP_HMAC_SECRET)) {
+        ctx.addIssue({
+          code: 'custom',
+          path: ['OTP_HMAC_SECRET'],
+          message: 'OTP_HMAC_SECRET still has a placeholder value',
+        });
+      }
+      if (env.OTP_HMAC_SECRET === env.AUTH_JWT_SECRET || env.OTP_HMAC_SECRET === env.CSRF_SECRET) {
+        ctx.addIssue({
+          code: 'custom',
+          path: ['OTP_HMAC_SECRET'],
+          message: 'OTP_HMAC_SECRET must differ from AUTH_JWT_SECRET and CSRF_SECRET',
+        });
+      }
+    }
 
     // Production hardening: fail fast instead of running with development defaults.
     const secrets = ['AUTH_JWT_SECRET', 'CSRF_SECRET', 'INTERNAL_SERVICE_TOKEN'] as const;
@@ -211,6 +273,9 @@ const envSchema = z
     ...env,
     // The job lease must outlive a full Python call so a healthy worker never loses its job.
     JOB_LEASE_MS: env.JOB_LEASE_MS ?? env.PYTHON_LLM_TIMEOUT_MS + 30_000,
+    OTP_HMAC_SECRET:
+      env.OTP_HMAC_SECRET ??
+      createHmac('sha256', env.AUTH_JWT_SECRET).update('content-review:otp-hmac:v1').digest('hex'),
     TRUST_PROXY: parseTrustProxy(env.TRUST_PROXY),
   }));
 

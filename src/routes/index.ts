@@ -16,6 +16,7 @@ export function createApiRouter(c: Container, csrf: CsrfProtection): Router {
     createAuthRouter({
       env: c.env,
       authService: c.authService,
+      otpService: c.otpService,
       csrf,
       authRateLimiter: createRateLimiter({
         windowMs: c.env.RATE_LIMIT_WINDOW_MS,

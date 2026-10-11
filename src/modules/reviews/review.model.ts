@@ -25,11 +25,15 @@ const reviewSchema = new Schema(
     contentLength: { type: Number, required: true, min: 1 },
     /** Categories the client asked for. Informational only: the AI service reviews every type. */
     categories: { type: [{ type: String, enum: FINDING_CATEGORIES }], default: [] },
+    /** Model the author picked; null = the AI service's default. */
+    model: { type: String, default: null, maxlength: 200 },
     status: { type: String, enum: REVIEW_STATUSES, default: 'pending', required: true },
     findings: { type: [findingSchema], default: [] },
     findingCount: { type: Number, default: 0 },
     errorCode: { type: String, default: null },
     errorMessage: { type: String, default: null },
+    /** User-safe structured failure details, e.g. quota reset time. */
+    errorDetails: { type: Schema.Types.Mixed, default: null },
     /** Monotonic counter used to assign SSE event ids. */
     eventSeq: { type: Number, default: 0 },
     /** Job attempt that currently owns processing; guards writes from stale workers. */
@@ -80,6 +84,8 @@ export interface ReviewRecord {
   findingCount: number;
   errorCode: string | null;
   errorMessage: string | null;
+  errorDetails: Record<string, unknown> | null;
+  model: string | null;
   eventSeq: number;
   jobAttempt: number;
   startedAt: Date | null;

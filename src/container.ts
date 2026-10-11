@@ -12,7 +12,9 @@ import { PrometheusMetrics } from './infrastructure/metrics/prometheus-metrics.j
 import { HttpPythonLlmClient } from './integrations/python-llm/http-llm-client.js';
 import type { PythonLlmClient } from './integrations/python-llm/llm-client.js';
 import { MockPythonLlmClient } from './integrations/python-llm/mock-llm-client.js';
+import { createEmailService, type EmailService } from './infrastructure/email/email.service.js';
 import { AuthService } from './modules/auth/auth.service.js';
+import { OtpService } from './modules/auth/otp.service.js';
 import { DocumentService } from './modules/documents/document.service.js';
 import { ReviewEventStore } from './modules/reviews/review-event-store.js';
 import { ReviewProcessor } from './modules/reviews/review.processor.js';
@@ -29,6 +31,8 @@ export interface Container {
   sseRegistry: SseRegistry;
   llmClient: PythonLlmClient;
   authService: AuthService;
+  emailService: EmailService;
+  otpService: OtpService;
   events: ReviewEventStore;
   jobQueue: JobQueue;
   processor: ReviewProcessor;
@@ -67,11 +71,12 @@ async function countJobsByStatus(): Promise<Record<string, number>> {
 export function createContainer(
   env: Env,
   logger: Logger,
-  overrides: Partial<Pick<Container, 'llmClient' | 'metrics'>> = {},
+  overrides: Partial<Pick<Container, 'llmClient' | 'metrics' | 'emailService'>> = {},
 ): Container {
   const metrics = overrides.metrics ?? createMetrics(env, logger);
   const bus = new EventBus();
   const llmClient = overrides.llmClient ?? createLlmClient(env, logger);
+  const emailService = overrides.emailService ?? createEmailService(env);
   const events = new ReviewEventStore(bus);
   const jobQueue = new JobQueue(bus, {
     maxAttempts: env.JOB_MAX_ATTEMPTS,
@@ -115,6 +120,8 @@ export function createContainer(
     sseRegistry: new SseRegistry(),
     llmClient,
     authService: new AuthService(env),
+    emailService,
+    otpService: new OtpService(env, emailService, logger.child({ component: 'otp' })),
     events,
     jobQueue,
     processor,
@@ -124,6 +131,7 @@ export function createContainer(
       events,
       logger: logger.child({ component: 'review-service' }),
       retentionDays: env.REVIEW_RETENTION_DAYS,
+      llmClient,
     }),
     documentService: new DocumentService(),
     worker,

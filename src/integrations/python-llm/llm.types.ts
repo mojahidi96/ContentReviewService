@@ -29,6 +29,23 @@ export interface ContentReviewRequest {
   content: string;
   /** Defaults to "en" on the Python side. */
   language?: string;
+  /** Gemini model chosen by the author. Omitted = the Python service's default. */
+  model?: string;
+}
+
+/** Response of GET /internal/v1/content-reviews/models. */
+export interface ModelCatalog {
+  defaultModel: string;
+  models: string[];
+}
+
+/** Why and until when the AI provider refused a request for quota reasons. */
+export interface QuotaInfo {
+  model: string | null;
+  quotaScope: 'daily' | 'minute' | 'unknown';
+  retryAfterSeconds: number | null;
+  /** ISO-8601 UTC time at which the quota is expected to reset. */
+  resetAt: string | null;
 }
 
 /**

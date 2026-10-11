@@ -20,6 +20,11 @@ export function createReviewRouter(deps: {
   const router = Router();
   router.use(requireAuth);
 
+  // Registered before '/:reviewId', which would reject "models" as an invalid id.
+  router.get('/models', async (_req, res) => {
+    res.set('Cache-Control', 'no-store').json(await reviewService.listModels());
+  });
+
   router.post(
     '/',
     csrfProtect,

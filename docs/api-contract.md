@@ -109,6 +109,7 @@ should branch on `code`.
 | 400  | `MALFORMED_JSON`            | Body is not valid JSON                                        |
 | 401  | `AUTH_REQUIRED`             | No valid session (missing, expired, revoked)                  |
 | 401  | `INVALID_CREDENTIALS`       | Login failed (same response for unknown email/wrong password) |
+| 401  | `OTP_INVALID`               | Emailed code wrong, expired, used, exhausted or email unknown |
 | 403  | `CSRF_INVALID`              | Missing/invalid `X-CSRF-Token`                                |
 | 403  | `ORIGIN_NOT_ALLOWED`        | Request origin not in the allowlist                           |
 | 404  | `NOT_FOUND`                 | Unknown route                                                 |
@@ -167,6 +168,46 @@ Errors: `400`, `403`, `409 EMAIL_ALREADY_REGISTERED`, `429`.
 `{ "email": "...", "password": "..." }` → `200 { "user": User, "csrfToken": "string" }` + cookie.
 Errors: `401 INVALID_CREDENTIALS` (generic), `400`, `403`, `429`.
 
+### Emailed codes: sign-in and password reset
+
+A 4-digit code is emailed to the account's address and exchanged for a session. None of these
+endpoints needs a session; all require CSRF like `login`. Request bodies are strict (unknown
+keys → `400`). `email` follows the `register` rules.
+
+Codes: 4 digits, valid `expiresInSeconds` (default 300), **single use**, and **at most 5 failed
+attempts per code** (`OTP_MAX_ATTEMPTS`); the code is deleted after the 5th failure, so further
+attempts (even with the right code) get `401 OTP_INVALID` until a new code is requested. A new
+request replaces any earlier code for the same purpose. Sign-in and reset codes are independent
+and not interchangeable.
+
+#### `POST /auth/otp/request` _(CSRF)_ and `POST /auth/password/forgot` _(CSRF)_
+
+`{ "email": "alice@example.com" }` → `202 { "expiresInSeconds": 300 }` (`Cache-Control: no-store`).
+
+`otp/request` sends a sign-in code, `password/forgot` a password-reset code. The response is
+**identical whether or not the account exists**; the email is sent after responding, and a failed
+send does not change the response. Errors: `400`, `403`, `429`.
+
+#### `POST /auth/otp/login` _(CSRF)_
+
+`{ "email": "...", "otp": "0420" }` (`otp` matches `^\d{4}$`) →
+`200 { "user": User, "csrfToken": "string" }` + session cookie, exactly like `login`.
+Errors: `401 OTP_INVALID` (same response for wrong, expired, used, exhausted or unknown email),
+`400` (`details[].path` e.g. `body.otp`), `403`, `429`.
+
+#### `POST /auth/password/reset` _(CSRF)_
+
+`{ "email": "...", "otp": "0420", "newPassword": "at least 12 chars" }` →
+`200 { "user": User, "csrfToken": "string" }` + session cookie. `newPassword` follows the
+`register` password rules (12 characters minimum, ≤ 72 UTF-8 bytes). On success the password is
+changed, **every other session of the user is revoked**, and a new session is started.
+Errors: `401 OTP_INVALID`, `400` (e.g. `body.otp`, `body.newPassword`), `403`, `429`.
+
+Rate limits (per IP **and** per email, applied whether or not the account exists; `429
+RATE_LIMITED` with `Retry-After`): code requests 3 per 15 min per email and 10 per IP;
+verification endpoints count failed attempts only, 10 per email and 30 per IP per 15 min.
+These come in addition to the shared auth limiter.
+
 ### `POST /auth/logout` _(auth, CSRF)_
 
 `204 No Content`. Revokes the session and clears the session and CSRF cookies.
@@ -182,12 +223,25 @@ Errors: `401 INVALID_CREDENTIALS` (generic), `400`, `403`, `429`.
 All review endpoints require authentication. Every query is scoped to the current user;
 another user's review is reported as `404 REVIEW_NOT_FOUND`.
 
+### `GET /reviews/models` _(auth)_
+
+Models the author may choose from (feeds the UI dropdown). The list comes from the AI service and
+is cached for 5 minutes.
+
+```json
+{ "defaultModel": "gemini-3.6-flash", "models": ["gemini-3.6-flash", "gemini-3.8-flash"] }
+```
+
+Errors: `503 LLM_SERVICE_UNAVAILABLE` when the list cannot be loaded (the UI should fall back to
+"default model" and still allow submitting without `model`).
+
 ### `POST /reviews` _(CSRF)_
 
 ```json
 {
   "documentTitle": "Quarterly Business Report",
   "content": "The report have several mistake.",
+  "model": "gemini-3.8-flash",
   "categories": ["grammar", "spelling"]
 }
 ```
@@ -196,6 +250,7 @@ another user's review is reported as `404 REVIEW_NOT_FOUND`.
 | --------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `documentTitle` | 1–200 chars after trimming                                                                                                                                                  |
 | `content`       | not blank; ≤ `REVIEW_MAX_CONTENT_CHARS` **code points** (default 50 000); well-formed Unicode. Stored **exactly as sent** (no trimming/normalization) so offsets stay valid |
+| `model`         | **optional**: one of `GET /reviews/models`. Omitted = the default model. An unknown value is `400 VALIDATION_FAILED` (`details[].path = "model"`)                           |
 | `categories`    | **optional**, informational: non-empty, unique list of `Category` values. Stored and echoed back, but every issue type is always checked                                    |
 
 Response `202 Accepted` (returns immediately; analysis runs in the background), header
@@ -323,6 +378,16 @@ interface Document extends DocumentSummary {
 
 ---
 
+### Quota failures
+
+When the AI provider's quota is exhausted the review ends as `failed` with
+`errorCode: "LLM_SERVICE_RATE_LIMITED"`. `errorMessage` is ready to display, for example
+_"The daily quota for model gemini-3.6-flash is exhausted. It resets in about 1h 58m. Try again
+later or choose a different model."_ `errorDetails.resetAt` / `retryAfterSeconds` let the UI show a
+countdown or local time. A short per-minute quota (≤ 5 min) is retried automatically first; a long
+(daily) quota fails immediately, because retrying cannot succeed. The author can resubmit with a
+different `model`.
+
 ## 5. Server-Sent Events
 
 `GET /api/v1/reviews/{reviewId}/events` (auth required; cookie sent via `withCredentials`).
@@ -363,7 +428,7 @@ All payloads include `reviewId` and `occurredAt`.
 | `review.progress`  | `{ reviewId, stage, attempt, nextAttemptAt?, occurredAt }` — `stage` ∈ `analyzing`, `validating`, `persisting`, `retrying` (`nextAttemptAt` only for `retrying`) |
 | `finding.detected` | `{ reviewId, finding: Finding, occurredAt }` — one per finding, ordered by offset                                                                                |
 | `review.completed` | `{ reviewId, status: "completed", findingCount, completedAt, occurredAt }` — terminal                                                                            |
-| `review.failed`    | `{ reviewId, status: "failed", errorCode, errorMessage, occurredAt }` — terminal                                                                                 |
+| `review.failed`    | `{ reviewId, status: "failed", errorCode, errorMessage, errorDetails?, occurredAt }` — terminal; see "Quota failures" below                                      |
 
 Typical sequence: `review.started` → `review.progress(analyzing)` → (`review.progress(retrying)`
 → `review.progress(analyzing)`)\* → `review.progress(validating)` → `review.progress(persisting)` →
@@ -457,6 +522,14 @@ type Category =
   | 'inappropriate_language'
   | 'profanity'; // only on reviews created before the AI service v2; new findings never use it
 
+// Present for errorCode === 'LLM_SERVICE_RATE_LIMITED' (provider quota exhausted).
+interface ErrorDetails {
+  model: string | null; // model whose quota ran out
+  quotaScope: 'daily' | 'minute' | 'unknown';
+  retryAfterSeconds: number | null;
+  resetAt: string | null; // ISO-8601 UTC: when the quota is expected to reset
+}
+
 interface ReviewSummary {
   reviewId: string;
   documentTitle: string;
@@ -465,6 +538,8 @@ interface ReviewSummary {
   findingCount: number; // 0 until completed
   errorCode: string | null; // set when status === 'failed'
   errorMessage: string | null; // user-safe
+  errorDetails: ErrorDetails | null; // structured reason, e.g. quota reset time
+  model: string | null; // model the author picked; null = default
   createdAt: string;
   updatedAt: string;
   completedAt: string | null;
@@ -506,12 +581,15 @@ Review status lifecycle: `pending → processing → completed | failed`. `cance
 
 ## 8. Limits
 
-| Limit                     | Default                    | Config                                   |
-| ------------------------- | -------------------------- | ---------------------------------------- |
-| Request body              | 512 kB                     | `BODY_LIMIT`                             |
-| Content length            | 50 000 code points         | `REVIEW_MAX_CONTENT_CHARS`               |
-| Document length           | 50 000 code points         | `DOCUMENT_MAX_CONTENT_CHARS`             |
-| API rate limit            | 300 req / 15 min / IP      | `RATE_LIMIT_MAX`, `RATE_LIMIT_WINDOW_MS` |
-| Login/register rate limit | 20 req / 15 min / IP       | `AUTH_RATE_LIMIT_MAX`                    |
-| Page size                 | 50                         | —                                        |
-| Review retention          | 90 days, then auto-deleted | `REVIEW_RETENTION_DAYS`                  |
+| Limit                     | Default                      | Config                                   |
+| ------------------------- | ---------------------------- | ---------------------------------------- |
+| Request body              | 512 kB                       | `BODY_LIMIT`                             |
+| Content length            | 50 000 code points           | `REVIEW_MAX_CONTENT_CHARS`               |
+| Document length           | 50 000 code points           | `DOCUMENT_MAX_CONTENT_CHARS`             |
+| API rate limit            | 300 req / 15 min / IP        | `RATE_LIMIT_MAX`, `RATE_LIMIT_WINDOW_MS` |
+| Login/register rate limit | 20 req / 15 min / IP         | `AUTH_RATE_LIMIT_MAX`                    |
+| Emailed code requests     | 3 / 15 min / email, 10 / IP  | `OTP_REQUEST_LIMIT_PER_EMAIL`, `_PER_IP` |
+| Emailed code failures     | 10 / 15 min / email, 30 / IP | `OTP_VERIFY_LIMIT_PER_EMAIL`, `_PER_IP`  |
+| Emailed code lifetime     | 300 s, 5 failed attempts     | `OTP_TTL_SECONDS`, `OTP_MAX_ATTEMPTS`    |
+| Page size                 | 50                           | —                                        |
+| Review retention          | 90 days, then auto-deleted   | `REVIEW_RETENTION_DAYS`                  |

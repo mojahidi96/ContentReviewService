@@ -14,6 +14,10 @@ const prod = {
   NODE_ENV: 'production',
   FRONTEND_ORIGIN: 'https://app.example.com',
   AUTH_COOKIE_SECURE: 'true',
+  MAIL_TRANSPORT: 'smtp',
+  SMTP_URL: 'smtps://user:pass@smtp.example.com:465',
+  MAIL_FROM: 'ContentReview <no-reply@example.com>',
+  OTP_HMAC_SECRET: 'd'.repeat(40),
 };
 
 function issuesFor(env: Record<string, string>): string[] {
@@ -80,6 +84,35 @@ describe('environment validation', () => {
 
   it('requires Secure cookies for SameSite=None', () => {
     expect(issuesFor({ ...base, AUTH_COOKIE_SAMESITE: 'none' }).join()).toMatch(/SameSite=None/);
+  });
+
+  it('derives the OTP secret outside production and applies OTP defaults', () => {
+    const env = loadEnv(base);
+    expect(env).toMatchObject({
+      OTP_TTL_SECONDS: 300,
+      OTP_MAX_ATTEMPTS: 5,
+      MAIL_TRANSPORT: 'console',
+    });
+    expect(env.OTP_HMAC_SECRET).toMatch(/^[a-f0-9]{64}$/);
+    expect(env.OTP_HMAC_SECRET).not.toBe(base.AUTH_JWT_SECRET);
+  });
+
+  it.each([
+    ['the console mail transport', { MAIL_TRANSPORT: 'console' }, /MAIL_TRANSPORT/],
+    ['no OTP_HMAC_SECRET', { OTP_HMAC_SECRET: '' }, /OTP_HMAC_SECRET/],
+    [
+      'an OTP secret equal to the JWT secret',
+      { OTP_HMAC_SECRET: 'a'.repeat(40) },
+      /OTP_HMAC_SECRET/,
+    ],
+    ['smtp without SMTP_URL', { SMTP_URL: '' }, /SMTP_URL/],
+  ])('rejects production mail/OTP config with %s', (_name, override, pattern) => {
+    const { OTP_HMAC_SECRET: _drop, ...withoutSecret } = prod;
+    const source =
+      'OTP_HMAC_SECRET' in override && override.OTP_HMAC_SECRET === ''
+        ? withoutSecret
+        : { ...prod, ...override };
+    expect(issuesFor(source).join('\n')).toMatch(pattern);
   });
 
   it('accepts a hardened production configuration', () => {

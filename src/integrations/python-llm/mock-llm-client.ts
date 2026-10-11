@@ -9,6 +9,7 @@ import type {
   FindingSeverity,
   IssueType,
   LlmHealth,
+  ModelCatalog,
   ReviewContentOptions,
 } from './llm.types.js';
 
@@ -145,9 +146,16 @@ export class MockPythonLlmClient implements PythonLlmClient {
     return {
       requestId: req.requestId,
       issues,
-      model: 'mock-rules-v2',
+      model: req.model ?? 'mock-rules-v2',
       usage: { inputTokens: null, outputTokens: null },
     };
+  }
+
+  listModels(): Promise<ModelCatalog> {
+    return Promise.resolve({
+      defaultModel: 'mock-rules-v2',
+      models: ['mock-rules-v2', 'mock-rules-v3'],
+    });
   }
 
   checkHealth(): Promise<LlmHealth> {

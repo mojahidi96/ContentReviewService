@@ -41,6 +41,17 @@ logs it.
 
 ---
 
+> **Timeout budget.** Python caps one review at 45 s across all Gemini retries (25 s per call)
+> and answers `504 LLM_PROVIDER_TIMEOUT` when it runs out. Node's `PYTHON_LLM_TIMEOUT_MS` (60 s)
+> must stay larger, otherwise Node abandons a call that Python keeps running and burns provider
+> quota. A timed-out review is retried once (`LlmTimeoutError.maxRetries = 1`), so the worst case
+> before the author sees a failure is about 2 × 45 s plus backoff.
+
+## 1b. `GET /internal/v1/content-reviews/models`
+
+Same auth. Returns `{ "defaultModel": "...", "models": ["...", "..."] }`; `defaultModel` is
+included in `models`. Node caches it for 5 minutes and validates the author's choice against it.
+
 ## 2. `POST /internal/v1/content-reviews`
 
 Reviews the content and returns the complete list of issues in one (synchronous, LLM-backed)
@@ -56,11 +67,12 @@ response.
 }
 ```
 
-| Field       | Type   | Rules                                                               |
-| ----------- | ------ | ------------------------------------------------------------------- |
-| `requestId` | string | 1–128 chars. Node sends the review id. Echoed in the response       |
-| `content`   | string | 1–100 000 chars. Node sends the stored content exactly as submitted |
-| `language`  | string | Optional, default `"en"`. Node currently omits it                   |
+| Field       | Type   | Rules                                                                                      |
+| ----------- | ------ | ------------------------------------------------------------------------------------------ |
+| `requestId` | string | 1–128 chars. Node sends the review id. Echoed in the response                              |
+| `content`   | string | 1–100 000 chars. Node sends the stored content exactly as submitted                        |
+| `language`  | string | Optional, default `"en"`. Node currently omits it                                          |
+| `model`     | string | Optional. Must be one of `GET .../models`; else `422 MODEL_NOT_ALLOWED`. Omitted = default |
 
 **No other fields are allowed**: Python answers `422 INVALID_REQUEST` to unknown fields, so Node
 sends exactly these. Every issue type is always checked; there is no category filter.
@@ -135,17 +147,37 @@ ignored, so Python may add optional fields at any time.
 Error responses use `{ "error": { "code", "message", "requestId" } }`. Node.js classifies by
 HTTP status (and `code` where noted) and logs the code, never the message body.
 
-| Status    | `code`                                             | Node.js behavior                                                              | Review `errorCode`         |
-| --------- | -------------------------------------------------- | ----------------------------------------------------------------------------- | -------------------------- |
-| 401       | `UNAUTHORIZED`                                     | Configuration bug: fail, **no retry**, log an error                           | `LLM_REQUEST_REJECTED`     |
-| 413       | `CONTENT_TOO_LARGE`                                | Fail, no retry ("shorten the content")                                        | `LLM_CONTENT_TOO_LARGE`    |
-| 422       | `INVALID_REQUEST`                                  | Bug in our payload: fail, no retry                                            | `LLM_REQUEST_REJECTED`     |
-| 429       | `LLM_QUOTA_EXHAUSTED`                              | Back off (honoring `Retry-After`) within `JOB_MAX_ATTEMPTS`, then "try later" | `LLM_SERVICE_RATE_LIMITED` |
-| 502       | `INVALID_MODEL_OUTPUT`                             | Retry **once**                                                                | `LLM_INVALID_RESPONSE`     |
-| 503       | `LLM_PROVIDER_UNAVAILABLE`, `AI_CONCURRENCY_LIMIT` | Retry with backoff, **at most 2** retries                                     | `LLM_SERVICE_UNAVAILABLE`  |
-| 408/504   | any                                                | Retry with backoff within `JOB_MAX_ATTEMPTS`                                  | `LLM_SERVICE_TIMEOUT`      |
-| other 4xx | any                                                | Fail, no retry                                                                | `LLM_REQUEST_REJECTED`     |
-| other 5xx | any                                                | Retry with backoff within `JOB_MAX_ATTEMPTS`                                  | `LLM_SERVICE_UNAVAILABLE`  |
+| Status | `code`                | Node.js behavior                                                                                                                               | Review `errorCode`         |
+| ------ | --------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------- |
+| 401    | `UNAUTHORIZED`        | Configuration bug: fail, **no retry**, log an error                                                                                            | `LLM_REQUEST_REJECTED`     |
+| 413    | `CONTENT_TOO_LARGE`   | Fail, no retry ("shorten the content")                                                                                                         | `LLM_CONTENT_TOO_LARGE`    |
+| 422    | `INVALID_REQUEST`     | Bug in our payload: fail, no retry                                                                                                             | `LLM_REQUEST_REJECTED`     |
+| 429    | `LLM_QUOTA_EXHAUSTED` | Wait ≤ 5 min: back off (honoring `Retry-After`) within `JOB_MAX_ATTEMPTS`. Longer (daily quota): fail at once, surfacing `message` + `details` | `LLM_SERVICE_RATE_LIMITED` |
+| 422    | `MODEL_NOT_ALLOWED`   | Do not retry (Node validates the model first, so this means a stale list)                                                                      | `LLM_REQUEST_REJECTED`     |
+
+A 429 body carries `details` and a `Retry-After` header:
+
+```json
+{
+  "error": {
+    "code": "LLM_QUOTA_EXHAUSTED",
+    "message": "The daily quota for model gemini-3.6-flash is exhausted. It resets in about 1h 58m. Try again later or choose a different model.",
+    "requestId": "…",
+    "details": {
+      "model": "gemini-3.6-flash",
+      "quotaScope": "daily",
+      "retryAfterSeconds": 7105,
+      "resetAt": "2026-10-11T05:30:00+00:00"
+    }
+  }
+}
+```
+
+| 502 | `INVALID_MODEL_OUTPUT` | Retry **once** | `LLM_INVALID_RESPONSE` |
+| 503 | `LLM_PROVIDER_UNAVAILABLE`, `AI_CONCURRENCY_LIMIT` | Retry with backoff, **at most 2** retries | `LLM_SERVICE_UNAVAILABLE` |
+| 408/504 | any | Retry with backoff within `JOB_MAX_ATTEMPTS` | `LLM_SERVICE_TIMEOUT` |
+| other 4xx | any | Fail, no retry | `LLM_REQUEST_REJECTED` |
+| other 5xx | any | Retry with backoff within `JOB_MAX_ATTEMPTS` | `LLM_SERVICE_UNAVAILABLE` |
 
 Network failures (refused, reset, DNS) and timeouts are retried with backoff within
 `JOB_MAX_ATTEMPTS`.

@@ -11,15 +11,22 @@ import {
   LlmTimeoutError,
   LlmUnavailableError,
 } from './llm.errors.js';
-import { contentReviewResponseSchema, pythonErrorBodySchema } from './llm.schemas.js';
+import {
+  contentReviewResponseSchema,
+  modelCatalogSchema,
+  pythonErrorBodySchema,
+} from './llm.schemas.js';
 import type {
   ContentReviewRequest,
   ContentReviewResponse,
   LlmHealth,
+  ModelCatalog,
+  QuotaInfo,
   ReviewContentOptions,
 } from './llm.types.js';
 
 export const ANALYZE_PATH = '/internal/v1/content-reviews';
+export const MODELS_PATH = '/internal/v1/content-reviews/models';
 export const HEALTH_PATH = '/internal/v1/health';
 const MAX_RESPONSE_BYTES = 5 * 1024 * 1024;
 /** Retries allowed for a 503 (LLM_PROVIDER_UNAVAILABLE, AI_CONCURRENCY_LIMIT). */
@@ -97,6 +104,7 @@ export class HttpPythonLlmClient implements PythonLlmClient {
           requestId: req.requestId,
           content: req.content,
           ...(req.language === undefined ? {} : { language: req.language }),
+          ...(req.model === undefined ? {} : { model: req.model }),
         }),
       });
     } catch (err) {
@@ -108,6 +116,38 @@ export class HttpPythonLlmClient implements PythonLlmClient {
 
     if (status >= 200 && status < 300) return this.parseSuccess(text, req.requestId);
     throw this.mapStatusError(status, text, response.headers['retry-after']);
+  }
+
+  async listModels(opts: { signal?: AbortSignal } = {}): Promise<ModelCatalog> {
+    const timeoutSignal = AbortSignal.timeout(Math.min(this.options.timeoutMs, 10_000));
+    const signal = opts.signal ? AbortSignal.any([opts.signal, timeoutSignal]) : timeoutSignal;
+    let response: Dispatcher.ResponseData;
+    try {
+      response = await request(`${this.baseUrl}${MODELS_PATH}`, {
+        method: 'GET',
+        dispatcher: this.agent,
+        signal,
+        headers: {
+          accept: 'application/json',
+          authorization: `Bearer ${this.options.serviceToken}`,
+        },
+      });
+    } catch (err) {
+      throw this.mapTransportError(err, opts.signal);
+    }
+    const text = await this.readBody(response, opts.signal);
+    if (response.statusCode < 200 || response.statusCode >= 300) {
+      throw this.mapStatusError(response.statusCode, text, response.headers['retry-after']);
+    }
+    let json: unknown;
+    try {
+      json = JSON.parse(text);
+    } catch (err) {
+      throw new LlmBadResponseError('Python model list is not valid JSON', { cause: err });
+    }
+    const parsed = modelCatalogSchema.safeParse(json);
+    if (!parsed.success) throw new LlmBadResponseError('Python model list violated the contract');
+    return parsed.data;
   }
 
   async checkHealth(): Promise<LlmHealth> {
@@ -187,9 +227,22 @@ export class HttpPythonLlmClient implements PythonLlmClient {
     retryAfter: string | string[] | undefined,
   ): LlmError {
     let upstreamCode: string | undefined;
+    let upstreamMessage: string | undefined;
+    let quota: QuotaInfo | undefined;
     try {
       const parsed = pythonErrorBodySchema.safeParse(JSON.parse(text));
-      if (parsed.success) upstreamCode = parsed.data.error.code;
+      if (parsed.success) {
+        const error = parsed.data.error;
+        upstreamCode = error.code;
+        upstreamMessage = error.message;
+        const d = error.details;
+        quota = {
+          model: d?.model ?? null,
+          quotaScope: d?.quotaScope ?? 'unknown',
+          retryAfterSeconds: d?.retryAfterSeconds ?? null,
+          resetAt: d?.resetAt ?? null,
+        };
+      }
     } catch {
       // Non-JSON error bodies are fine; the status code drives classification.
     }
@@ -207,7 +260,12 @@ export class HttpPythonLlmClient implements PythonLlmClient {
       case 413:
         return new LlmContentTooLargeError(detail);
       case 429:
-        return new LlmRateLimitedError(detail, retryAfterOpt);
+        return new LlmRateLimitedError(detail, {
+          ...retryAfterOpt,
+          ...(quota ? { quota } : {}),
+          // Python's message names the model and the reset time and is safe to show the author.
+          ...(upstreamCode === 'LLM_QUOTA_EXHAUSTED' && upstreamMessage ? { upstreamMessage } : {}),
+        });
       case 408:
       case 504:
         return new LlmTimeoutError(detail);
