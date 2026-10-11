@@ -1,0 +1,70 @@
+# Render Blueprint for the Node API (https://render.com/docs/blueprint-spec).
+# The Angular UI is a separate Render Static Site that rewrites /api/* to this service, so UI and
+# API share one origin and the default SameSite=Lax cookies and CSRF work unchanged.
+# Values marked `sync: false` are secrets or environment-specific: Render asks for them in the
+# dashboard on first sync and they are never stored in this repository.
+services:
+  - type: web
+    name: content-review-api
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    plan: starter # Always on, so the in-process job worker keeps running and SMTP is allowed.
+    # region: oregon # Pick the region closest to your MongoDB Atlas cluster.
+    healthCheckPath: /health/live
+    autoDeployTrigger: commit
+    # Rate limiters are per instance (in memory). Keep a single instance, see README.
+    numInstances: 1
+    envVars:
+      # --- Runtime ---------------------------------------------------------------------------
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: '3000' # Matches the Dockerfile EXPOSE and HEALTHCHECK.
+      - key: HOST
+        value: 0.0.0.0
+      - key: LOG_FORMAT
+        value: json
+      - key: LOG_LEVEL
+        value: info
+      # Render terminates TLS in front of the service: one proxy hop, so rate limits see real IPs.
+      - key: TRUST_PROXY
+        value: '1'
+      # No private scraper is available on Render; keep the metrics listener off.
+      - key: METRICS_ENABLED
+        value: 'false'
+      - key: WORKER_ENABLED
+        value: 'true'
+      # --- Database --------------------------------------------------------------------------
+      - key: MONGODB_URI
+        sync: false # mongodb+srv://<prod user>:<password>@<cluster>/content_review?retryWrites=true&w=majority
+      # --- Browser access and cookies --------------------------------------------------------
+      - key: FRONTEND_ORIGIN
+        sync: false # Exact https origin of the static site, e.g. https://content-review-ui.onrender.com
+      - key: AUTH_COOKIE_SECURE
+        value: 'true'
+      - key: AUTH_COOKIE_SAMESITE
+        value: lax
+      # --- Secrets generated once by Render (>= 32 chars, all different) ------------------------
+      - key: AUTH_JWT_SECRET
+        generateValue: true
+      - key: CSRF_SECRET
+        generateValue: true
+      - key: OTP_HMAC_SECRET
+        generateValue: true
+      # --- Python LLM service (Hugging Face Space) ---------------------------------------------
+      - key: PYTHON_LLM_MODE
+        value: http
+      - key: AI_SERVICE_BASE_URL
+        sync: false # https://<hf-user>-<space-name>.hf.space
+      - key: INTERNAL_SERVICE_TOKEN
+        sync: false # Must equal the Space's INTERNAL_SERVICE_TOKEN secret (>= 32 chars)
+      # Must stay above the Python service's 45 s total budget.
+      - key: PYTHON_LLM_TIMEOUT_MS
+        value: '60000'
+      # --- Emailed codes (Brevo / Resend SMTP; never the console transport in production) ----
+      - key: MAIL_TRANSPORT
+        value: smtp
+      - key: SMTP_URL
+        sync: false # smtps://<user>:<smtp key>@smtp-relay.brevo.com:465 (percent-encode special characters)
+      - key: MAIL_FROM
+        sync: false # "ContentReview <no-reply@your-verified-domain>"

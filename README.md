@@ -217,6 +217,29 @@ In production, point your platform's log agent at container stdout and have Prom
 compatible agent such as Grafana Alloy / Datadog / CloudWatch) scrape port 9464; the dashboard
 JSON in `observability/grafana/dashboards/` can be imported into any Grafana.
 
+## Deploying to Render (API) and Hugging Face Spaces (Python service)
+
+Order matters: the API needs the Space URL, and the Space needs the shared token.
+
+1. **Python service**: deploy the `ContentReviewOpenAI` repo as a public **Docker Space** (see its
+   README). Set its secrets `GOOGLE_API_KEY` and `INTERNAL_SERVICE_TOKEN` (random, >= 32 chars).
+   Its URL is `https://<hf-user>-<space-name>.hf.space`.
+2. **MongoDB Atlas**: create a dedicated production user and allow only Render's outbound IPs
+   (service > Connect > Outbound), not `0.0.0.0/0`.
+3. **Email**: create a Brevo or Resend SMTP key and verify the sender. Use an SMTP port that Render
+   allows (465 or 2525, not 25/587 on free instances). The `console` transport is refused in production.
+4. **API**: create a Render Blueprint from `render.yaml`. Render generates `AUTH_JWT_SECRET`,
+   `CSRF_SECRET` and `OTP_HMAC_SECRET`; enter `MONGODB_URI`, `AI_SERVICE_BASE_URL`,
+   `INTERNAL_SERVICE_TOKEN` (same as the Space), `SMTP_URL`, `MAIL_FROM` and `FRONTEND_ORIGIN`.
+5. **UI**: deploy `ContentReviewUI` as a Static Site with rewrite rules `/api/*` ->
+   `https://<api>.onrender.com/api/*` (rewrite) and `/*` -> `/index.html`, then set the API's
+   `FRONTEND_ORIGIN` to the static site's origin.
+
+Run a **single API instance**: rate limiters are in memory per instance. Verify with
+`curl https://<api>.onrender.com/health/ready` (`pythonLlm` should be `ok`) and by requesting a
+sign-in code from the UI. Free Hugging Face Spaces sleep when idle; the first review after a pause
+is retried automatically while the Space wakes up.
+
 ## Deployment and security checklist
 
 - `NODE_ENV=production` enforces: `AUTH_COOKIE_SECURE=true`, https-only `FRONTEND_ORIGIN`,
